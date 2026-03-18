@@ -1,0 +1,25 @@
+# 显式导出 C API 符号，供 Python ctypes 使用；若未定义则链接报错
+HERMES_CLIENT {
+  global:
+    hermes_init_system;
+    hermes_search;
+    hermes_update;
+    hermes_batch_update;
+    hermes_set_epoch;
+    hermes_get_num_writers;
+    hermes_reload_index;
+    hermes_clear_writer;
+    hermes_reset_update_state;
+    hermes_delete_updates;
+    hermes_load_update_state;
+    hermes_prepare_state_for_incremental_add;
+    hermes_set_database_dir;
+    hermes_free_string;
+    hermes_cleanup;
+    hermes_get_last_error;
+    hermes_get_encrypted_document;
+    hermes_decrypt_document;
+    hermes_free_buffer;
+  local: *;
+};
+

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes - 多写作者邮件合规审计系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔐 Hermes 多写作者邮件合规审计系统</h1>
+            <p class="subtitle">安然（Enron）场景 · 审计员跨员工加密邮件关键字检索 · 云端仅见密文</p>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('search')">合规检索</button>
+            <button class="tab-btn" onclick="switchTab('update')">更新文件</button>
+            <button class="tab-btn" onclick="switchTab('status')">系统状态</button>
+        </div>
+
+        <!-- 合规检索标签页 -->
+        <div id="search-tab" class="tab-content active">
+            <div class="card">
+                <h2>跨员工关键字检索</h2>
+                <p class="card-desc">输入关键字，在已授权员工加密库中检索（聚合搜索令牌，一键覆盖多员工）。</p>
+                <form id="search-form" onsubmit="handleSearch(event)">
+                    <div class="form-group">
+                        <label for="keyword">关键字:</label>
+                        <input 
+                            type="text" 
+                            id="keyword" 
+                            name="keyword" 
+                            placeholder="例如: Deal, Special Purpose Entities ..." 
+                            required
+                            autocomplete="off"
+                        >
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="writer-select">选择员工范围 (可选):</label>
+                        <select id="writer-select" multiple>
+                            <!-- 动态加载：当前审计员可检索的员工列表 -->
+                        </select>
+                        <small>不选则检索全部已授权员工。按住 Ctrl (Windows) 或 Cmd (Mac) 多选</small>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">
+                        <span class="btn-text">检索</span>
+                        <span class="btn-loading" style="display: none;">检索中...</span>
+                    </button>
+                </form>
+            </div>
+
+            <div id="search-results" class="results-container" style="display: none;">
+                <h3>检索结果</h3>
+                <div id="search-meta" class="search-meta"></div>
+                <div id="results-content"></div>
+            </div>
+        </div>
+
+        <!-- 更新文件标签页：用关键字更新框内容替换原文件并同步索引，无需重启即可检索 -->
+        <div id="update-tab" class="tab-content">
+            <div class="card">
+                <h2>更新文件</h2>
+                <p class="card-desc">选择员工与文件 ID，在下方框中输入或编辑内容后点击「更新文件」：将替换原文件、重建该员工的 database 关键字索引，并同步到服务端，<strong>无需重启服务器</strong>即可用新关键字检索。</p>
+                <p class="card-desc" style="margin-bottom: 0.5rem;">
+                    C++ 服务：<span id="client-connection-status" class="client-status">检测中...</span>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-reinit-client" onclick="requestReinitClient(); updateClientStatus();" style="margin-left: 8px;">重试连接</button>
+                </p>
+                <p id="client-load-error-hint" class="card-desc client-load-hint" style="display: none; margin-top: 0.25rem; font-size: 0.85rem; color: #6b7280;"></p>
+                <div class="form-group">
+                    <label for="doc-update-writer-id">员工 (Writer):</label>
+                    <select id="doc-update-writer-id" required>
+                        <!-- 由 loadWriters 填充 -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="doc-update-file-id">文件 ID:</label>
+                    <input type="number" id="doc-update-file-id" placeholder="输入该员工的文件ID..." min="1">
+                </div>
+                <div class="form-group">
+                    <button type="button" class="btn btn-secondary" id="doc-load-btn" onclick="loadDocumentContent()">加载原文</button>
+                    <span id="doc-path-hint" class="optional-hint" style="margin-left: 8px;"></span>
+                </div>
+                <div class="form-group">
+                    <label for="doc-update-content">文件内容（将完全替换原文件，更新后新关键字可直接检索）:</label>
+                    <textarea id="doc-update-content" rows="12" placeholder="加载原文后在此编辑，或直接输入新内容，点击「更新文件」后即可用新关键字搜索..." style="width: 100%; box-sizing: border-box;"></textarea>
+                </div>
+                <button type="button" class="btn btn-success" id="doc-save-btn" onclick="handleSaveDocument()">更新文件</button>
+                <div id="doc-update-result" class="result-message" style="display: none; margin-top: 0.75rem;"></div>
+            </div>
+        </div>
+
+        <!-- 系统状态标签页 -->
+        <div id="status-tab" class="tab-content">
+            <div class="card">
+                <h2>系统状态</h2>
+                <p class="card-desc">云服务器连接、审计阶段（Epoch）及当前授权可检索员工数。</p>
+                <div id="status-content">
+                    <p>正在加载系统状态...</p>
+                </div>
+                <button onclick="refreshStatus()" class="btn btn-secondary">刷新状态</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+
