@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes - 读者检索</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Hermes 读者端</h1>
+            <p class="subtitle">读者登录后可进行跨写者关键字检索</p>
+            <div style="margin-top: 10px;">
+                <span style="margin-right: 12px; color: #4b5563;">当前账号: {{ user.username }}</span>
+                <button class="btn btn-secondary btn-sm" onclick="logout()">退出登录</button>
+            </div>
+        </header>
+
+        <div id="search-tab" class="tab-content active">
+            <div class="card">
+                <h2>跨写者关键字检索</h2>
+                <p class="card-desc">输入关键字，在授权写者加密库中检索。</p>
+                <form id="search-form" onsubmit="handleSearch(event)">
+                    <div class="form-group">
+                        <label for="keyword">关键字:</label>
+                        <input type="text" id="keyword" name="keyword" placeholder="例如: Deal, Security ..." required autocomplete="off">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="writer-select">选择写者范围 (可选):</label>
+                        <select id="writer-select" multiple></select>
+                        <small>不选则检索全部已授权写者。按住 Ctrl/Cmd 多选</small>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">
+                        <span class="btn-text">检索</span>
+                        <span class="btn-loading" style="display: none;">检索中...</span>
+                    </button>
+                </form>
+            </div>
+
+            <div id="search-results" class="results-container" style="display: none;">
+                <h3>检索结果</h3>
+                <div id="search-meta" class="search-meta"></div>
+                <div id="results-content"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>系统状态</h2>
+            <div id="status-content">
+                <p>正在加载系统状态...</p>
+            </div>
+            <button onclick="refreshStatus()" class="btn btn-secondary">刷新状态</button>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

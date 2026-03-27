@@ -5,7 +5,7 @@
 云服务器仅存储加密索引、执行搜索，无法获知关键字明文。
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
 from flask_cors import CORS
 import os
 import sys
@@ -14,6 +14,7 @@ import base64
 import json
 import subprocess
 from pathlib import Path
+from functools import wraps
 
 # 添加当前目录到路径
 sys.path.insert(0, os.path.dirname(__file__))
@@ -75,6 +76,7 @@ except ImportError:
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 CORS(app)
+app.secret_key = os.getenv("HERMES_WEB_SECRET", "hermes-web-dev-secret-change-me")
 
 CLIENT_CONFIG = {
     'server_address': HERMES_SERVER,
@@ -85,6 +87,50 @@ hermes_client = HermesClient(**CLIENT_CONFIG)
 # 使 C++ 客户端的 load_update_state 与 Flask 写入的 database 目录一致，避免增量添加时用错 count 覆盖链导致原有关键字-文件对消失
 if getattr(hermes_client, 'set_database_dir', None):
     hermes_client.set_database_dir(str(DATABASE_DIR.resolve()))
+
+READER_USERNAME = os.getenv("HERMES_READER_USERNAME", "reader")
+READER_PASSWORD = os.getenv("HERMES_READER_PASSWORD", "reader123")
+WRITER_PASSWORD_PREFIX = os.getenv("HERMES_WRITER_PASSWORD_PREFIX", "writer")
+
+
+def _get_session_user():
+    user = session.get("auth_user")
+    if isinstance(user, dict) and user.get("role") in {"reader", "writer"}:
+        return user
+    return None
+
+
+def _get_user_accessible_writer_ids():
+    user = _get_session_user()
+    if not user:
+        return []
+    if user.get("role") == "reader":
+        return get_auditor_writer_ids()
+    if user.get("role") == "writer":
+        wid = user.get("writer_id")
+        if isinstance(wid, int):
+            return [wid]
+    return []
+
+
+def _require_roles(roles):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            user = _get_session_user()
+            if not user:
+                if request.path.startswith("/api/"):
+                    return jsonify({"success": False, "error": "Unauthorized. Please login first."}), 401
+                return redirect(url_for("login_page"))
+            if roles and user.get("role") not in roles:
+                if request.path.startswith("/api/"):
+                    return jsonify({"success": False, "error": "Forbidden for current role."}), 403
+                if user.get("role") == "reader":
+                    return redirect(url_for("reader_home"))
+                return redirect(url_for("writer_home"))
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def get_server_num_writers() -> int:
@@ -390,11 +436,98 @@ def _rebuild_database_for_writer_incremental(writer_id: int, file_id: int, new_c
 
 @app.route('/')
 def index():
-    """主页"""
-    return render_template('index.html')
+    user = _get_session_user()
+    if not user:
+        return redirect(url_for("login_page"))
+    if user.get("role") == "reader":
+        return redirect(url_for("reader_home"))
+    return redirect(url_for("writer_home"))
+
+
+@app.route('/login', methods=['GET'])
+def login_page():
+    user = _get_session_user()
+    if user:
+        if user.get("role") == "reader":
+            return redirect(url_for("reader_home"))
+        return redirect(url_for("writer_home"))
+    return render_template('login.html')
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
+    try:
+        data = request.get_json() or {}
+        role = str(data.get("role", "")).strip().lower()
+        password = str(data.get("password", ""))
+        num_writers = get_server_num_writers()
+
+        if role == "reader":
+            username = str(data.get("username", "")).strip()
+            if username == READER_USERNAME and password == READER_PASSWORD:
+                session["auth_user"] = {
+                    "role": "reader",
+                    "username": username,
+                }
+                return jsonify({
+                    "success": True,
+                    "role": "reader",
+                    "redirect": url_for("reader_home"),
+                })
+            return jsonify({"success": False, "error": "读者账号或密码错误"}), 401
+
+        if role == "writer":
+            writer_id_raw = data.get("writer_id")
+            try:
+                writer_id = int(writer_id_raw)
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "error": "writer_id 必须是整数"}), 400
+
+            if writer_id < 0 or writer_id >= num_writers:
+                return jsonify({"success": False, "error": f"writer_id 必须在 0 到 {num_writers - 1} 之间"}), 400
+
+            expected_password = f"{WRITER_PASSWORD_PREFIX}{writer_id + 1}"
+            if password != expected_password:
+                return jsonify({"success": False, "error": "写者密码错误"}), 401
+
+            session["auth_user"] = {
+                "role": "writer",
+                "writer_id": writer_id,
+                "username": f"writer{writer_id + 1}",
+            }
+            return jsonify({
+                "success": True,
+                "role": "writer",
+                "redirect": url_for("writer_home"),
+            })
+
+        return jsonify({"success": False, "error": "role 必须是 reader 或 writer"}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"登录失败: {str(e)}"}), 500
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def api_logout():
+    session.pop("auth_user", None)
+    return jsonify({"success": True, "redirect": url_for("login_page")})
+
+
+@app.route('/reader')
+@_require_roles({"reader"})
+def reader_home():
+    user = _get_session_user()
+    return render_template("reader.html", user=user)
+
+
+@app.route('/writer')
+@_require_roles({"writer"})
+def writer_home():
+    user = _get_session_user()
+    return render_template("writer.html", user=user)
 
 
 @app.route('/api/status', methods=['GET'])
+@_require_roles({"reader", "writer"})
 def status():
     """获取系统状态（含 Epoch、审计员授权信息）"""
     mode = "unknown"
@@ -403,7 +536,7 @@ def status():
         mode = "cpp" if getattr(hermes_client, "_initialized", False) else "cli_fallback"
     except Exception:
         mode = "unknown"
-    allowed = get_auditor_writer_ids()
+    allowed = _get_user_accessible_writer_ids()
     return jsonify({
         'status': 'online',
         'server_address': CLIENT_CONFIG['server_address'],
@@ -416,6 +549,7 @@ def status():
 
 
 @app.route('/api/search', methods=['POST'])
+@_require_roles({"reader"})
 def search():
     """
     搜索API
@@ -458,7 +592,7 @@ def search():
                 'error': 'writer_ids must be a list'
             }), 400
 
-        allowed = get_auditor_writer_ids()
+        allowed = _get_user_accessible_writer_ids()
         if writer_ids is None:
             writer_ids = allowed
         else:
@@ -536,6 +670,7 @@ def search():
 
 
 @app.route('/api/update', methods=['POST'])
+@_require_roles({"writer"})
 def update():
     """
     更新API
@@ -572,7 +707,7 @@ def update():
         file_id = int(data['file_id'])
         file_path = data.get('file_path', "").strip()  # 可选：新文档时填写，用于同步 database_paths
         
-        allowed = get_auditor_writer_ids()
+        allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
             return jsonify({
                 'success': False,
@@ -640,6 +775,7 @@ def update():
 
 
 @app.route('/api/document-content', methods=['GET'])
+@_require_roles({"writer"})
 def document_content():
     """
     根据 database_paths 获取指定用户、文件ID 对应的原文路径与内容（用于「文档内容更新」加载原文）。
@@ -650,7 +786,7 @@ def document_content():
         file_id = request.args.get('file_id', type=int)
         if writer_id is None or file_id is None:
             return jsonify({'success': False, 'error': 'Missing writer_id or file_id'}), 400
-        allowed = get_auditor_writer_ids()
+        allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
             return jsonify({'success': False, 'error': f'writer_id={writer_id} not allowed'}), 403
         path = get_file_path_from_database_paths(writer_id, file_id)
@@ -669,6 +805,7 @@ def document_content():
 
 
 @app.route('/api/update-document', methods=['POST'])
+@_require_roles({"writer"})
 def update_document():
     """
     更新文件：用 new_content 覆盖指定用户、文件ID 对应的原文，重建该用户的 database 索引，
@@ -690,7 +827,7 @@ def update_document():
             new_content = ''
         else:
             new_content = str(new_content)
-        allowed = get_auditor_writer_ids()
+        allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
             return jsonify({'success': False, 'error': f'writer_id={writer_id} not allowed'}), 403
         path = get_file_path_from_database_paths(writer_id, file_id)
@@ -790,6 +927,7 @@ def update_document():
 
 
 @app.route('/api/client-status', methods=['GET'])
+@_require_roles({"writer"})
 def client_status():
     """返回当前是否已连接 C++ 服务（用于前端显示与重试提示）。"""
     connected = getattr(hermes_client, '_initialized', False)
@@ -808,6 +946,7 @@ def client_status():
 
 
 @app.route('/api/reinit-client', methods=['POST'])
+@_require_roles({"writer"})
 def reinit_client():
     """
     重新尝试连接 C++ server（适用于 server 先启动、app 后启动导致初始化未连上的情况）。
@@ -824,6 +963,7 @@ def reinit_client():
 
 
 @app.route('/api/reload-index', methods=['POST'])
+@_require_roles({"writer"})
 def reload_index():
     """
     通知 C++ 服务器从 database 文件重新加载索引，使检索反映已更新的 database/*.txt。
@@ -851,9 +991,10 @@ def reload_index():
 
 
 @app.route('/api/writers', methods=['GET'])
+@_require_roles({"reader", "writer"})
 def get_writers():
     """获取当前审计员可搜索的写入者列表（受 HERMES_ALLOWED_WRITERS 限制）"""
-    allowed = get_auditor_writer_ids()
+    allowed = _get_user_accessible_writer_ids()
     return jsonify({
         'success': True,
         'writers': [
@@ -864,6 +1005,7 @@ def get_writers():
 
 
 @app.route('/api/document', methods=['POST'])
+@_require_roles({"reader"})
 def get_document():
     """
     获取邮件文档：decrypt=false 仅返回加密内容，decrypt=true 返回解密后原文。
@@ -897,7 +1039,7 @@ def get_document():
         file_id = int(data['file_id'])
         decrypt = data.get('decrypt', True)
 
-        allowed = get_auditor_writer_ids()
+        allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
             return jsonify({
                 'success': False,
@@ -1043,5 +1185,3 @@ if __name__ == '__main__':
     print(f"  Allowed writers: {'all' if ALLOWED_WRITERS is None else ALLOWED_WRITERS}")
     print(f"  请在浏览器打开: http://127.0.0.1:{FLASK_PORT} 或 http://localhost:{FLASK_PORT}")
     app.run(host='0.0.0.0', port=FLASK_PORT, debug=FLASK_DEBUG)
-
-

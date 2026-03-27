@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes 登录</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Hermes 角色认证登录</h1>
+            <p class="subtitle">先选择角色，再进入对应功能页面</p>
+        </header>
+
+        <div class="card" style="max-width: 560px; margin: 0 auto;">
+            <h2>登录</h2>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="login-role">角色</label>
+                    <select id="login-role" required>
+                        <option value="reader">读者（审计员）</option>
+                        <option value="writer">写者</option>
+                    </select>
+                </div>
+
+                <div class="form-group" id="reader-username-group">
+                    <label for="login-username">读者账号</label>
+                    <input type="text" id="login-username" value="reader" autocomplete="username">
+                </div>
+
+                <div class="form-group" id="writer-id-group" style="display: none;">
+                    <label for="login-writer-id">写者 ID（0-based）</label>
+                    <input type="number" id="login-writer-id" min="0" placeholder="例如: 0">
+                </div>
+
+                <div class="form-group">
+                    <label for="login-password">密码</label>
+                    <input type="password" id="login-password" required autocomplete="current-password" placeholder="输入密码">
+                    <small id="login-hint">默认读者账号：reader / reader123</small>
+                </div>
+
+                <button type="submit" class="btn btn-primary">
+                    <span class="btn-text">登录</span>
+                    <span class="btn-loading" style="display: none;">登录中...</span>
+                </button>
+            </form>
+            <div id="login-result" class="result-message" style="display: none; margin-top: 1rem;"></div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

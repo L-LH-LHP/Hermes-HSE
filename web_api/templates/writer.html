@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes - 写者更新</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Hermes 写者端</h1>
+            <p class="subtitle">写者登录后可更新自己的文件与索引</p>
+            <div style="margin-top: 10px;">
+                <span style="margin-right: 12px; color: #4b5563;">当前账号: {{ user.username }} (writer_id={{ user.writer_id }})</span>
+                <button class="btn btn-secondary btn-sm" onclick="logout()">退出登录</button>
+            </div>
+        </header>
+
+        <div class="card">
+            <h2>更新文件</h2>
+            <p class="card-desc">选择文件 ID，编辑内容后更新：将替换原文件并同步该写者索引。</p>
+            <p class="card-desc" style="margin-bottom: 0.5rem;">
+                C++ 服务：<span id="client-connection-status" class="client-status">检测中...</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-reinit-client" onclick="requestReinitClient(); updateClientStatus();" style="margin-left: 8px;">重试连接</button>
+            </p>
+            <p id="client-load-error-hint" class="card-desc client-load-hint" style="display: none; margin-top: 0.25rem; font-size: 0.85rem; color: #6b7280;"></p>
+            <div class="form-group">
+                <label for="doc-update-writer-id">写者 (Writer):</label>
+                <select id="doc-update-writer-id" required></select>
+            </div>
+            <div class="form-group">
+                <label for="doc-update-file-id">文件 ID:</label>
+                <input type="number" id="doc-update-file-id" placeholder="输入该写者的文件ID..." min="1">
+            </div>
+            <div class="form-group">
+                <button type="button" class="btn btn-secondary" id="doc-load-btn" onclick="loadDocumentContent()">加载原文</button>
+                <span id="doc-path-hint" class="optional-hint" style="margin-left: 8px;"></span>
+            </div>
+            <div class="form-group">
+                <label for="doc-update-content">文件内容（更新后关键字可直接检索）:</label>
+                <textarea id="doc-update-content" rows="12" placeholder="加载原文后在此编辑，或直接输入新内容..." style="width: 100%; box-sizing: border-box;"></textarea>
+            </div>
+            <button type="button" class="btn btn-success" id="doc-save-btn" onclick="handleSaveDocument()">更新文件</button>
+            <div id="doc-update-result" class="result-message" style="display: none; margin-top: 0.75rem;"></div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+# Dataset and generated local data
+maildir/
+database/
+database_paths/
+
+# Python virtual environments and caches
+web_api/.venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Build artifacts
+build/
+bin/
+out/
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Backups and local editor files
+*.bak
+.DS_Store
+.idea/
+.vscode/

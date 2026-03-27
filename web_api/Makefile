@@ -28,7 +28,7 @@ TARGET_LIB = libhermes_client.so
 TARGET_LIB_WIN = libhermes_client.dll
 
 # 源文件
-SOURCES = hermes_client_api.cpp document_storage.cpp
+SOURCES = libhermes_all.cpp
 HEADERS = hermes_client_api.hpp document_storage.hpp ../hickae.hpp ../types.hpp ../config.hpp
 
 .PHONY: all clean lib install test

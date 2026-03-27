@@ -2,6 +2,10 @@
 #include <config.hpp>
 #include <string>
 #include <unordered_map>
+#include <string>
+using std::string;
+using std::unordered_map;
+
 #include "pbc.h"
 #include "pbc_test.h"
 
