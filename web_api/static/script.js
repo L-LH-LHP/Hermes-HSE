@@ -4,6 +4,30 @@ const API_BASE = (typeof window !== 'undefined' && window.location && window.loc
     ? 'http://127.0.0.1:5000'
     : '';
 
+let currentSearchKeyword = '';
+let currentSearchResults = [];
+let currentSearchTimeMs = null;
+let currentWriterFilter = null; // writer_id in backend response (1-based)
+let currentWriterDistributionRows = [];
+let currentTopNRows = [];
+let currentRiskRows = [];
+
+const CASE_STORAGE_KEY = 'hermes_reader_cases_v1';
+const KEYWORD_PACKS = {
+    financial_fraud: {
+        label: '财务舞弊排查',
+        keywords: ['deal', 'special purpose', 'offshore', 'hedging', 'guarantee', 'transfer', 'side letter', 'valuation', 'revenue', 'reserve']
+    },
+    insider_trading: {
+        label: '内幕交易线索',
+        keywords: ['confidential', 'earnings', 'guidance', 'acquisition', 'merger', 'announcement', 'material', 'nonpublic', 'board', 'rumor']
+    },
+    data_leakage: {
+        label: '数据泄露风险',
+        keywords: ['attachment', 'forward', 'external', 'download', 'client list', 'password', 'account', 'export', 'private', 'leak']
+    }
+};
+
 function getEl(id) {
     return document.getElementById(id);
 }
@@ -30,12 +54,59 @@ document.addEventListener('DOMContentLoaded', function() {
     if (getEl('search-form')) {
         loadWriters();
         refreshStatus();
+        initReaderEnhancements();
     }
     if (getEl('doc-update-writer-id')) {
         loadWriters();
         updateClientStatus();
     }
 });
+
+function initReaderEnhancements() {
+    initKeywordPackSelect();
+    renderCaseList();
+}
+
+function initKeywordPackSelect() {
+    const select = getEl('keyword-pack-select');
+    if (!select) return;
+    select.innerHTML = '';
+    Object.keys(KEYWORD_PACKS).forEach(key => {
+        const option = document.createElement('option');
+        option.value = key;
+        option.textContent = KEYWORD_PACKS[key].label;
+        select.appendChild(option);
+    });
+}
+
+function getSelectedKeywordPack() {
+    const select = getEl('keyword-pack-select');
+    if (!select) return null;
+    return KEYWORD_PACKS[select.value] || null;
+}
+
+function loadKeywordPackToTopN() {
+    const pack = getSelectedKeywordPack();
+    const textarea = getEl('topn-keywords');
+    if (!pack || !textarea) {
+        showToast('未找到词包', 'error');
+        return;
+    }
+    textarea.value = pack.keywords.join(', ');
+    showToast(`已加载词包：${pack.label}`, 'success');
+}
+
+function runKeywordPackQuickScan() {
+    const pack = getSelectedKeywordPack();
+    const textarea = getEl('topn-keywords');
+    const form = getEl('topn-form');
+    if (!pack || !textarea || !form) {
+        showToast('词包扫描失败', 'error');
+        return;
+    }
+    textarea.value = pack.keywords.join(', ');
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+}
 
 function initLoginPage() {
     const roleSelect = getEl('login-role');
@@ -221,12 +292,321 @@ async function handleSearch(event) {
     }
 }
 
+async function handleTopNKeywords(event) {
+    event.preventDefault();
+
+    const raw = (getEl('topn-keywords') && getEl('topn-keywords').value) ? getEl('topn-keywords').value : '';
+    const keywords = parseBatchKeywords(raw);
+    if (keywords.length === 0) {
+        showToast('请先输入至少一个关键词', 'error');
+        hideTopNResults();
+        return;
+    }
+
+    const topNInput = getEl('topn-limit');
+    let topN = parseInt(topNInput ? topNInput.value : '10', 10);
+    if (isNaN(topN) || topN < 1) topN = 10;
+    if (topN > 100) topN = 100;
+
+    const writerSelect = getEl('writer-select');
+    const selectedOptions = writerSelect ? Array.from(writerSelect.selectedOptions) : [];
+    const writerIds = selectedOptions.map(option => parseInt(option.value, 10));
+    const writerIdsParam = writerIds.length > 0 ? writerIds : null;
+
+    const submitBtn = event.target.querySelector('button[type="submit"]');
+    const btnText = submitBtn.querySelector('.btn-text');
+    const btnLoading = submitBtn.querySelector('.btn-loading');
+    submitBtn.disabled = true;
+    btnText.style.display = 'none';
+    btnLoading.style.display = 'inline';
+
+    try {
+        const tasks = keywords.map(async keyword => {
+            const data = await apiFetchJson('/api/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    keyword: keyword,
+                    writer_ids: writerIdsParam
+                })
+            });
+            if (data && data.success) {
+                const total = getTotalFileCount(data.results);
+                const writerCounts = {};
+                (data.results || []).forEach(item => {
+                    const count = item && item.file_ids ? item.file_ids.length : 0;
+                    if (count > 0) writerCounts[item.writer_id] = count;
+                });
+                return {
+                    keyword: keyword,
+                    total: total,
+                    writersHit: (data.results || []).filter(r => (r.file_ids || []).length > 0).length,
+                    timeMs: data.search_time_ms,
+                    writerCounts: writerCounts,
+                    ok: true
+                };
+            }
+            return {
+                keyword: keyword,
+                total: 0,
+                writersHit: 0,
+                timeMs: null,
+                writerCounts: {},
+                ok: false,
+                error: (data && data.error) ? data.error : '检索失败'
+            };
+        });
+
+        const all = await Promise.all(tasks);
+        const sorted = all
+            .sort((a, b) => {
+                if (b.total !== a.total) return b.total - a.total;
+                return a.keyword.localeCompare(b.keyword);
+            });
+        const topList = sorted.slice(0, topN);
+        currentTopNRows = topList;
+        renderTopNResults(keywords.length, topN, topList);
+        renderRiskProfileFromTopN(topList);
+        showToast(`Top-N 分析完成: 共分析 ${keywords.length} 个关键词`, 'success');
+    } catch (error) {
+        showToast('Top-N 分析失败: ' + (error.message || String(error)), 'error');
+        hideTopNResults();
+    } finally {
+        submitBtn.disabled = false;
+        btnText.style.display = 'inline';
+        btnLoading.style.display = 'none';
+    }
+}
+
+function parseBatchKeywords(rawText) {
+    const parts = String(rawText || '')
+        .split(/[\s,\n\r\t;，；]+/)
+        .map(s => s.trim().toLowerCase())
+        .filter(Boolean);
+    const uniq = [];
+    const seen = new Set();
+    parts.forEach(word => {
+        if (!seen.has(word)) {
+            seen.add(word);
+            uniq.push(word);
+        }
+    });
+    return uniq.slice(0, 100);
+}
+
+function renderTopNResults(totalKeywords, topN, rows) {
+    const panel = getEl('topn-results');
+    const collapse = getEl('topn-collapse');
+    const meta = getEl('topn-meta');
+    const content = getEl('topn-results-content');
+    if (!panel || !meta || !content) return;
+
+    if (!rows || rows.length === 0) {
+        panel.style.display = 'none';
+        return;
+    }
+
+    const okCount = rows.filter(r => r.ok).length;
+    meta.innerHTML = `<p class="search-meta-text">已分析 <strong>${totalKeywords}</strong> 个关键词，展示 Top <strong>${Math.min(topN, rows.length)}</strong>；成功 <strong>${okCount}</strong> 个。</p>`;
+
+    content.innerHTML = rows.map((row, idx) => `
+        <div class="topn-row">
+            <div class="topn-keyword">#${idx + 1} ${escapeHtml(row.keyword)}</div>
+            <div class="topn-value">命中 ${row.total} 封</div>
+            <div class="topn-value">覆盖 ${row.writersHit} 位写者</div>
+        </div>
+    `).join('');
+
+    panel.style.display = 'block';
+    if (collapse) collapse.open = true;
+}
+
+function hideTopNResults() {
+    const panel = getEl('topn-results');
+    if (panel) panel.style.display = 'none';
+    currentTopNRows = [];
+    renderRiskProfileFromTopN([]);
+}
+
+function renderRiskProfileFromTopN(rows) {
+    const content = getEl('risk-profile-content');
+    const collapse = getEl('risk-profile-collapse');
+    if (!content) return;
+
+    if (!rows || rows.length === 0) {
+        currentRiskRows = [];
+        content.innerHTML = '<div class="empty-state" style="padding: 16px;">先执行一次多关键词 Top-N 分析后显示画像。</div>';
+        return;
+    }
+
+    const writerAgg = {};
+    const maxRank = rows.length;
+    rows.forEach((row, idx) => {
+        const weight = maxRank - idx;
+        const counts = row.writerCounts || {};
+        Object.keys(counts).forEach(wid => {
+            const writerId = parseInt(wid, 10);
+            const cnt = parseInt(counts[wid], 10) || 0;
+            if (!writerAgg[writerId]) {
+                writerAgg[writerId] = { writerId: writerId, score: 0, hits: 0 };
+            }
+            writerAgg[writerId].score += cnt * weight;
+            writerAgg[writerId].hits += cnt;
+        });
+    });
+
+    const riskRows = Object.values(writerAgg).sort((a, b) => b.score - a.score);
+    currentRiskRows = riskRows;
+    if (riskRows.length === 0) {
+        content.innerHTML = '<div class="empty-state" style="padding: 16px;">当前 Top-N 无有效命中，无法生成风险画像。</div>';
+        return;
+    }
+
+    content.innerHTML = riskRows.map((row, idx) => `
+        <div class="risk-row">
+            <div class="risk-writer">#${idx + 1} 员工 ${row.writerId}</div>
+            <div class="risk-metric">风险分值 ${row.score}</div>
+            <div class="risk-metric">累计命中 ${row.hits} 封</div>
+        </div>
+    `).join('');
+
+    if (collapse) collapse.open = true;
+}
+
+function getStoredCases() {
+    try {
+        const raw = localStorage.getItem(CASE_STORAGE_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function setStoredCases(cases) {
+    localStorage.setItem(CASE_STORAGE_KEY, JSON.stringify(cases));
+}
+
+function getCurrentSelectedWriterIds() {
+    const writerSelect = getEl('writer-select');
+    if (!writerSelect) return [];
+    return Array.from(writerSelect.selectedOptions).map(option => parseInt(option.value, 10));
+}
+
+function saveCurrentCase() {
+    const caseNameInput = getEl('case-name');
+    const caseName = (caseNameInput && caseNameInput.value ? caseNameInput.value.trim() : '') || `Case-${new Date().toISOString().slice(0, 19)}`;
+    const topnKeywords = getEl('topn-keywords') ? getEl('topn-keywords').value : '';
+    const topnLimit = getEl('topn-limit') ? parseInt(getEl('topn-limit').value || '10', 10) : 10;
+    const keyword = getEl('keyword') ? getEl('keyword').value.trim() : '';
+
+    const newCase = {
+        id: Date.now(),
+        name: caseName,
+        created_at: new Date().toLocaleString(),
+        search: {
+            keyword: keyword,
+            selected_writer_ids: getCurrentSelectedWriterIds()
+        },
+        topn: {
+            keywords_text: topnKeywords,
+            limit: isNaN(topnLimit) ? 10 : topnLimit,
+            rows: (currentTopNRows || []).map(r => ({ keyword: r.keyword, total: r.total, writersHit: r.writersHit }))
+        },
+        risk_profile: (currentRiskRows || []).map(r => ({ writerId: r.writerId, score: r.score, hits: r.hits }))
+    };
+
+    const cases = getStoredCases();
+    cases.unshift(newCase);
+    setStoredCases(cases.slice(0, 50));
+    renderCaseList();
+    showToast('任务单已保存', 'success');
+}
+
+function applyCase(caseId) {
+    const cases = getStoredCases();
+    const target = cases.find(c => c.id === caseId);
+    if (!target) {
+        showToast('任务单不存在', 'error');
+        return;
+    }
+
+    if (getEl('keyword')) getEl('keyword').value = target.search && target.search.keyword ? target.search.keyword : '';
+    if (getEl('topn-keywords')) getEl('topn-keywords').value = target.topn && target.topn.keywords_text ? target.topn.keywords_text : '';
+    if (getEl('topn-limit')) getEl('topn-limit').value = (target.topn && target.topn.limit) ? target.topn.limit : 10;
+
+    const writerSelect = getEl('writer-select');
+    if (writerSelect && target.search && Array.isArray(target.search.selected_writer_ids)) {
+        const selectedSet = new Set(target.search.selected_writer_ids);
+        Array.from(writerSelect.options).forEach(option => {
+            option.selected = selectedSet.has(parseInt(option.value, 10));
+        });
+    }
+
+    showToast(`已应用任务单: ${target.name}`, 'success');
+}
+
+function deleteCase(caseId) {
+    const next = getStoredCases().filter(c => c.id !== caseId);
+    setStoredCases(next);
+    renderCaseList();
+    showToast('任务单已删除', 'success');
+}
+
+function renderCaseList() {
+    const container = getEl('case-list');
+    if (!container) return;
+    const cases = getStoredCases();
+    if (cases.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="padding: 12px;">暂无任务单，先保存一次当前分析。</div>';
+        return;
+    }
+    container.innerHTML = cases.map(c => `
+        <div class="case-item">
+            <div class="case-item-head">
+                <div>
+                    <div class="case-item-title">${escapeHtml(c.name)}</div>
+                    <div class="case-item-meta">${escapeHtml(c.created_at || '-')} · 检索词: ${escapeHtml((c.search && c.search.keyword) || '-')}</div>
+                </div>
+                <div class="case-item-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="applyCase(${c.id})">应用</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="deleteCase(${c.id})">删除</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function exportCasesJson() {
+    const cases = getStoredCases();
+    if (!cases.length) {
+        showToast('暂无可导出的任务单', 'error');
+        return;
+    }
+    const blob = new Blob([JSON.stringify(cases, null, 2)], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `hermes_cases_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('任务单 JSON 已导出', 'success');
+}
+
 function displaySearchResults(keyword, results, searchTimeMs) {
     const resultsContainer = getEl('search-results');
     const resultsContent = getEl('results-content');
     const searchMeta = getEl('search-meta');
 
     if (!resultsContainer || !resultsContent || !searchMeta) return;
+
+    currentSearchKeyword = keyword;
+    currentSearchResults = Array.isArray(results) ? results : [];
+    currentSearchTimeMs = searchTimeMs;
+    currentWriterFilter = null;
 
     if (typeof searchTimeMs === 'number') {
         searchMeta.innerHTML = `<p class="search-meta-text">关键字 "<strong>${escapeHtml(keyword)}</strong>" · 亚线性检索耗时 <strong>${searchTimeMs}</strong> ms</p>`;
@@ -236,41 +616,156 @@ function displaySearchResults(keyword, results, searchTimeMs) {
         searchMeta.style.display = 'none';
     }
 
-    if (!results || results.length === 0) {
-        resultsContent.innerHTML = `
-            <div class="empty-state">
-                <p>未找到包含关键字 "${escapeHtml(keyword)}" 的邮件</p>
-            </div>
-        `;
-    } else {
-        let html = '';
-        results.forEach(result => {
-            if (result.file_ids && result.file_ids.length > 0) {
-                html += `
-                    <div class="result-item">
-                        <h4>员工 ${result.writer_id}</h4>
-                        <p>匹配 ${result.file_ids.length} 封邮件，点击邮件ID查看明文内容:</p>
-                        <div class="file-ids">
-                            ${result.file_ids.map(id =>
-                                `<span class="file-id-badge" onclick="viewDocument(${result.writer_id - 1}, ${id})" title="点击查看邮件内容">${id}</span>`
-                            ).join('')}
-                        </div>
-                    </div>
-                `;
-            } else {
-                html += `
-                    <div class="result-item">
-                        <h4>员工 ${result.writer_id}</h4>
-                        <p>未找到匹配的邮件</p>
-                    </div>
-                `;
-            }
-        });
-        resultsContent.innerHTML = html;
+    renderSearchResultsWithFilter();
+    resultsContainer.style.display = 'block';
+    renderWriterDistributionChart(keyword, currentSearchResults);
+    resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function renderWriterDistributionChart(keyword, results) {
+    const panel = getEl('writer-dist-panel');
+    const collapse = getEl('writer-dist-collapse');
+    const meta = getEl('writer-dist-meta');
+    const chart = getEl('writer-dist-chart');
+    if (!panel || !meta || !chart) return;
+
+    const rows = (results || [])
+        .map(item => {
+            const count = item && item.file_ids ? item.file_ids.length : 0;
+            return { writerId: item.writer_id, count: count };
+        })
+        .filter(item => item.count > 0)
+        .sort((a, b) => b.count - a.count);
+    currentWriterDistributionRows = rows;
+
+    if (rows.length === 0) {
+        panel.style.display = 'none';
+        chart.innerHTML = '';
+        meta.textContent = '';
+        const clearBtn = getEl('writer-filter-clear-btn');
+        if (clearBtn) clearBtn.style.display = 'none';
+        return;
     }
 
-    resultsContainer.style.display = 'block';
-    resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const maxCount = rows[0].count;
+    const total = rows.reduce((sum, row) => sum + row.count, 0);
+    meta.textContent = `关键字 "${keyword}" 在 ${rows.length} 位写者中有命中，总命中文件数 ${total}。`;
+
+    chart.innerHTML = rows.map(row => {
+        const pct = maxCount > 0 ? (row.count / maxCount) * 100 : 0;
+        const isActive = currentWriterFilter === row.writerId;
+        return `
+            <div class="writer-dist-row ${isActive ? 'active' : ''}" onclick="applyWriterFilter(${row.writerId})" title="点击筛选为员工 ${row.writerId}">
+                <div class="writer-dist-label">员工 ${row.writerId}</div>
+                <div class="writer-dist-bar-wrap">
+                    <div class="writer-dist-bar" style="width: ${pct.toFixed(2)}%;">${pct >= 25 ? row.count : ''}</div>
+                </div>
+                <div class="writer-dist-count">${row.count} 封</div>
+            </div>
+        `;
+    }).join('');
+
+    const clearBtn = getEl('writer-filter-clear-btn');
+    if (clearBtn) clearBtn.style.display = currentWriterFilter == null ? 'none' : 'inline-flex';
+    panel.style.display = 'block';
+    if (collapse) collapse.open = true;
+}
+
+function renderSearchResultsWithFilter() {
+    const resultsContent = getEl('results-content');
+    const searchMeta = getEl('search-meta');
+    if (!resultsContent || !searchMeta) return;
+
+    const allResults = Array.isArray(currentSearchResults) ? currentSearchResults : [];
+    const filteredResults = currentWriterFilter == null
+        ? allResults
+        : allResults.filter(result => result.writer_id === currentWriterFilter);
+
+    if (typeof currentSearchTimeMs === 'number') {
+        const filterText = currentWriterFilter == null ? '' : ` · 当前筛选: 员工 ${currentWriterFilter}`;
+        searchMeta.innerHTML = `<p class="search-meta-text">关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · 亚线性检索耗时 <strong>${currentSearchTimeMs}</strong> ms${filterText}</p>`;
+        searchMeta.style.display = 'block';
+    }
+
+    if (!filteredResults || filteredResults.length === 0) {
+        const msg = currentWriterFilter == null
+            ? `未找到包含关键字 "${escapeHtml(currentSearchKeyword)}" 的邮件`
+            : `筛选后员工 ${currentWriterFilter} 无匹配邮件`;
+        resultsContent.innerHTML = `<div class="empty-state"><p>${msg}</p></div>`;
+        return;
+    }
+
+    let html = '';
+    filteredResults.forEach(result => {
+        if (result.file_ids && result.file_ids.length > 0) {
+            html += `
+                <div class="result-item">
+                    <h4>员工 ${result.writer_id}</h4>
+                    <p>匹配 ${result.file_ids.length} 封邮件，点击邮件ID查看明文内容:</p>
+                    <div class="file-ids">
+                        ${result.file_ids.map(id =>
+                            `<span class="file-id-badge" onclick="viewDocument(${result.writer_id - 1}, ${id})" title="点击查看邮件内容">${id}</span>`
+                        ).join('')}
+                    </div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="result-item">
+                    <h4>员工 ${result.writer_id}</h4>
+                    <p>未找到匹配的邮件</p>
+                </div>
+            `;
+        }
+    });
+    resultsContent.innerHTML = html;
+}
+
+function applyWriterFilter(writerId) {
+    if (currentWriterFilter === writerId) {
+        currentWriterFilter = null;
+    } else {
+        currentWriterFilter = writerId;
+    }
+    renderSearchResultsWithFilter();
+    renderWriterDistributionChart(currentSearchKeyword, currentSearchResults);
+}
+
+function clearWriterFilter() {
+    currentWriterFilter = null;
+    renderSearchResultsWithFilter();
+    renderWriterDistributionChart(currentSearchKeyword, currentSearchResults);
+}
+
+function exportWriterDistributionCsv() {
+    if (!currentWriterDistributionRows || currentWriterDistributionRows.length === 0) {
+        showToast('当前没有可导出的统计数据', 'error');
+        return;
+    }
+    const lines = ['keyword,writer_id,matched_files_count'];
+    currentWriterDistributionRows.forEach(row => {
+        lines.push(`${csvEscape(currentSearchKeyword)},${row.writerId},${row.count}`);
+    });
+    const csvContent = lines.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeKeyword = (currentSearchKeyword || 'keyword').replace(/[^a-zA-Z0-9_-]/g, '_');
+    a.download = `writer_distribution_${safeKeyword}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('统计 CSV 已导出', 'success');
+}
+
+function csvEscape(value) {
+    const s = String(value == null ? '' : value);
+    if (/[",\n]/.test(s)) {
+        return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
 }
 
 async function viewDocument(writerId, fileId) {
@@ -522,6 +1017,10 @@ async function requestReinitClient() {
 function hideSearchResults() {
     const container = getEl('search-results');
     if (container) container.style.display = 'none';
+    const chartPanel = getEl('writer-dist-panel');
+    if (chartPanel) chartPanel.style.display = 'none';
+    currentWriterFilter = null;
+    currentWriterDistributionRows = [];
 }
 
 function getTotalFileCount(results) {

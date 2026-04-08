@@ -45,6 +45,91 @@
                 <div id="search-meta" class="search-meta"></div>
                 <div id="results-content"></div>
             </div>
+
+            <details id="writer-dist-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 写者分布柱状图</span>
+                    <span class="collapsible-hint">点击展开/收起</span>
+                </summary>
+                <div id="writer-dist-panel" class="collapsible-body" style="display: none;">
+                    <div class="writer-dist-header">
+                        <h3>写者分布柱状图</h3>
+                        <div class="writer-dist-actions">
+                            <button id="writer-filter-clear-btn" type="button" class="btn btn-secondary btn-sm" style="display: none;" onclick="clearWriterFilter()">清除筛选</button>
+                            <button id="export-writer-csv-btn" type="button" class="btn btn-secondary btn-sm" onclick="exportWriterDistributionCsv()">导出当前统计 CSV</button>
+                        </div>
+                    </div>
+                    <p id="writer-dist-meta" class="card-desc"></p>
+                    <div id="writer-dist-chart" class="writer-dist-chart"></div>
+                </div>
+            </details>
+
+            <details id="topn-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 多关键词 Top-N</span>
+                    <span class="collapsible-hint">点击展开/收起</span>
+                </summary>
+                <div id="topn-panel" class="collapsible-body">
+                    <p class="card-desc">批量输入关键词（逗号、空格或换行分隔），按命中文件总数排序展示 Top-N。</p>
+                    <div class="pack-toolbar">
+                        <div class="pack-toolbar-left">
+                            <label for="keyword-pack-select">预置审计词包</label>
+                            <select id="keyword-pack-select"></select>
+                        </div>
+                        <div class="pack-toolbar-actions">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="loadKeywordPackToTopN()">加载到关键词列表</button>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="runKeywordPackQuickScan()">一键扫描词包</button>
+                        </div>
+                    </div>
+                    <form id="topn-form" onsubmit="handleTopNKeywords(event)">
+                        <div class="form-group">
+                            <label for="topn-keywords">关键词列表</label>
+                            <textarea id="topn-keywords" class="keyword-textarea" rows="5" placeholder="建议输入审计词表，例如：deal, security, special purpose entities, hedging, transfer"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="topn-limit">Top-N 数量</label>
+                            <input type="number" id="topn-limit" min="1" max="100" value="10">
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <span class="btn-text">分析 Top-N</span>
+                            <span class="btn-loading" style="display: none;">分析中...</span>
+                        </button>
+                    </form>
+                    <div id="topn-results" class="results-container topn-results" style="display: none;">
+                        <div id="topn-meta" class="search-meta"></div>
+                        <div id="topn-results-content"></div>
+                    </div>
+                </div>
+            </details>
+
+            <details id="risk-profile-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 写者风险画像</span>
+                    <span class="collapsible-hint">基于 Top-N 结果自动生成</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">风险分值按 Top-N 关键词在各写者的命中强度聚合。用于确定优先排查对象。</p>
+                    <div id="risk-profile-content" class="risk-profile-content">
+                        <div class="empty-state" style="padding: 16px;">先执行一次多关键词 Top-N 分析后显示画像。</div>
+                    </div>
+                </div>
+            </details>
+
+            <details id="case-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 审计任务单 Case</span>
+                    <span class="collapsible-hint">本地留痕与复盘</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">保存当前检索参数与分析结果快照，便于复盘、交接和报告整理。</p>
+                    <div class="case-toolbar">
+                        <input id="case-name" type="text" placeholder="任务单名称，例如：Q2 财务舞弊排查">
+                        <button type="button" class="btn btn-primary btn-sm" onclick="saveCurrentCase()">保存当前任务单</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="exportCasesJson()">导出任务单 JSON</button>
+                    </div>
+                    <div id="case-list" class="case-list"></div>
+                </div>
+            </details>
         </div>
 
         <div class="card">
