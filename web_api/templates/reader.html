@@ -19,6 +19,17 @@
 
         <div id="search-tab" class="tab-content active">
             <div class="card">
+                <h2>审计批次管理</h2>
+                <p class="card-desc">将一次审计工作绑定到固定批次（Epoch）。切换批次后，需要在新批次重新检索，不直接复用旧批次结果。</p>
+                <div class="batch-toolbar">
+                    <div id="active-batch-badge" class="writer-select-count">当前批次 Epoch: -</div>
+                    <input type="number" id="batch-epoch-input" min="1" value="1" style="width: 140px;">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="switchAuditBatch()">切换批次</button>
+                </div>
+                <div id="batch-switch-hint" class="input-hint" style="margin-top: 8px;"></div>
+            </div>
+
+            <div class="card">
                 <h2>跨写者关键字检索</h2>
                 <p class="card-desc">输入关键字，在授权写者加密库中检索。</p>
                 <form id="search-form" onsubmit="handleSearch(event)">
@@ -30,6 +41,13 @@
                     <div class="form-group">
                         <label for="writer-select">选择写者范围 (可选):</label>
                         <select id="writer-select" multiple></select>
+                        <div class="writer-select-toolbar">
+                            <div class="writer-select-actions">
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="selectAllWriters()">全选写者</button>
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="clearWritersSelection()">清空选择</button>
+                            </div>
+                            <div id="writer-select-count" class="writer-select-count">当前: 全部已授权写者</div>
+                        </div>
                         <small>不选则检索全部已授权写者。按住 Ctrl/Cmd 多选</small>
                     </div>
 
@@ -85,6 +103,7 @@
                         <div class="form-group">
                             <label for="topn-keywords">关键词列表</label>
                             <textarea id="topn-keywords" class="keyword-textarea" rows="5" placeholder="建议输入审计词表，例如：deal, security, special purpose entities, hedging, transfer"></textarea>
+                            <div id="topn-keyword-count" class="input-hint">当前将分析 0 个唯一关键词</div>
                         </div>
                         <div class="form-group">
                             <label for="topn-limit">Top-N 数量</label>
@@ -96,6 +115,7 @@
                         </button>
                     </form>
                     <div id="topn-results" class="results-container topn-results" style="display: none;">
+                        <div id="topn-progress" class="input-hint" style="margin-bottom: 8px;"></div>
                         <div id="topn-meta" class="search-meta"></div>
                         <div id="topn-results-content"></div>
                     </div>
@@ -127,6 +147,7 @@
                         <button type="button" class="btn btn-primary btn-sm" onclick="saveCurrentCase()">保存当前任务单</button>
                         <button type="button" class="btn btn-secondary btn-sm" onclick="exportCasesJson()">导出任务单 JSON</button>
                     </div>
+                    <div id="case-count" class="input-hint" style="margin-top: 8px;"></div>
                     <div id="case-list" class="case-list"></div>
                 </div>
             </details>

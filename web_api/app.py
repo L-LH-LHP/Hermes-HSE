@@ -133,6 +133,18 @@ def _require_roles(roles):
     return decorator
 
 
+def _get_active_epoch() -> int:
+    """返回当前会话的审计批次 Epoch（默认使用配置 HERMES_EPOCH）。"""
+    e = session.get("active_epoch", HERMES_EPOCH)
+    try:
+        e = int(e)
+    except Exception:
+        e = HERMES_EPOCH
+    if e < 1:
+        e = 1
+    return e
+
+
 def get_server_num_writers() -> int:
     """
     直接向Hermes server发送'G'查询真实writer数量。
@@ -542,10 +554,41 @@ def status():
         'server_address': CLIENT_CONFIG['server_address'],
         'num_writers': num_writers,
         'search_mode': mode,
-        'epoch': HERMES_EPOCH,
+        'epoch': _get_active_epoch(),
+        'default_epoch': HERMES_EPOCH,
         'allowed_writers': allowed,
         'allowed_writers_count': len(allowed),
     })
+
+
+@app.route('/api/audit-batch', methods=['GET'])
+@_require_roles({"reader"})
+def get_audit_batch():
+    return jsonify({
+        'success': True,
+        'active_epoch': _get_active_epoch(),
+        'default_epoch': HERMES_EPOCH,
+    })
+
+
+@app.route('/api/audit-batch', methods=['POST'])
+@_require_roles({"reader"})
+def set_audit_batch():
+    try:
+        data = request.get_json() or {}
+        epoch = int(data.get('epoch'))
+        if epoch < 1 or epoch > 1024:
+            return jsonify({'success': False, 'error': 'epoch 必须在 1..1024 范围内'}), 400
+        session['active_epoch'] = epoch
+        return jsonify({
+            'success': True,
+            'active_epoch': epoch,
+            'message': f'已切换到审计批次 Epoch={epoch}。为符合前向隐私，需在该批次重新执行检索。',
+        })
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'epoch 必须是整数'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/search', methods=['POST'])
@@ -599,6 +642,7 @@ def search():
             writer_ids = [w for w in writer_ids if w in set(allowed)]
 
         t0 = time.perf_counter()
+        active_epoch = _get_active_epoch()
         # 在子进程中执行搜索（加载 C++ 库），崩溃时仅 worker 退出，主进程返回 500
         worker_path = BASE_DIR / "run_search_worker.py"
         result = None
@@ -606,7 +650,7 @@ def search():
             try:
                 proc = subprocess.run(
                     [sys.executable, str(worker_path)],
-                    input=json.dumps({"keyword": keyword, "writer_ids": writer_ids}),
+                    input=json.dumps({"keyword": keyword, "writer_ids": writer_ids, "epoch": active_epoch}),
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -660,6 +704,7 @@ def search():
             'keyword': keyword,
             'results': results,
             'search_time_ms': search_time_ms,
+            'epoch': active_epoch,
         })
         
     except Exception as e:

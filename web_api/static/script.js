@@ -11,6 +11,9 @@ let currentWriterFilter = null; // writer_id in backend response (1-based)
 let currentWriterDistributionRows = [];
 let currentTopNRows = [];
 let currentRiskRows = [];
+const FILE_ID_PREVIEW_LIMIT = 30;
+let expandedWriterIds = new Set();
+let activeBatchEpoch = 1;
 
 const CASE_STORAGE_KEY = 'hermes_reader_cases_v1';
 const KEYWORD_PACKS = {
@@ -64,7 +67,74 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function initReaderEnhancements() {
     initKeywordPackSelect();
+    bindWriterSelectionUX();
+    bindTopNInputPreview();
+    refreshAuditBatch();
     renderCaseList();
+}
+
+async function refreshAuditBatch() {
+    const badge = getEl('active-batch-badge');
+    const input = getEl('batch-epoch-input');
+    const hint = getEl('batch-switch-hint');
+    try {
+        const data = await apiFetchJson('/api/audit-batch');
+        if (data && data.success) {
+            activeBatchEpoch = parseInt(data.active_epoch, 10) || 1;
+            if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+            if (input) input.value = String(activeBatchEpoch);
+            if (hint) hint.textContent = `默认批次为 ${data.default_epoch}。切换后请重新执行检索与分析。`;
+            return;
+        }
+    } catch (_) {}
+    if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+}
+
+async function switchAuditBatch() {
+    const input = getEl('batch-epoch-input');
+    const hint = getEl('batch-switch-hint');
+    const epoch = input ? parseInt(input.value, 10) : NaN;
+    if (isNaN(epoch) || epoch < 1) {
+        showToast('请输入合法的批次 Epoch（>=1）', 'error');
+        return;
+    }
+    const data = await apiFetchJson('/api/audit-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ epoch: epoch }),
+    });
+    if (!data || !data.success) {
+        showToast((data && data.error) ? data.error : '切换批次失败', 'error');
+        return;
+    }
+    activeBatchEpoch = epoch;
+    const badge = getEl('active-batch-badge');
+    if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+    if (hint) hint.textContent = data.message || '';
+    hideSearchResults();
+    hideTopNResults();
+    showToast(`已切换到 Epoch ${activeBatchEpoch}`, 'success');
+}
+
+function bindWriterSelectionUX() {
+    const writerSelect = getEl('writer-select');
+    if (!writerSelect) return;
+    writerSelect.addEventListener('change', updateWriterSelectionCount);
+}
+
+function bindTopNInputPreview() {
+    const textarea = getEl('topn-keywords');
+    if (!textarea) return;
+    textarea.addEventListener('input', updateTopNKeywordCount);
+    updateTopNKeywordCount();
+}
+
+function updateTopNKeywordCount() {
+    const textarea = getEl('topn-keywords');
+    const hint = getEl('topn-keyword-count');
+    if (!textarea || !hint) return;
+    const count = parseBatchKeywords(textarea.value).length;
+    hint.textContent = `当前将分析 ${count} 个唯一关键词`;
 }
 
 function initKeywordPackSelect() {
@@ -93,6 +163,7 @@ function loadKeywordPackToTopN() {
         return;
     }
     textarea.value = pack.keywords.join(', ');
+    updateTopNKeywordCount();
     showToast(`已加载词包：${pack.label}`, 'success');
 }
 
@@ -105,6 +176,7 @@ function runKeywordPackQuickScan() {
         return;
     }
     textarea.value = pack.keywords.join(', ');
+    updateTopNKeywordCount();
     form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
 }
 
@@ -235,12 +307,40 @@ async function loadWriters() {
             docUpdateSelect.value = String(data.writers[0].id);
             docUpdateSelect.disabled = true;
         }
+        updateWriterSelectionCount();
     } catch (error) {
         const msg = (error && error.message && /fetch|network|Failed to fetch/i.test(error.message))
             ? '无法连接后端。请通过 http://127.0.0.1:5000 打开页面并确保已运行 python app.py'
             : '加载写者列表失败';
         showToast(msg, 'error');
     }
+}
+
+function updateWriterSelectionCount() {
+    const select = getEl('writer-select');
+    const badge = getEl('writer-select-count');
+    if (!select || !badge) return;
+    const total = select.options.length;
+    const selected = Array.from(select.selectedOptions).length;
+    if (selected === 0) {
+        badge.textContent = `当前: 全部已授权写者 (${total})`;
+    } else {
+        badge.textContent = `当前: 已选择 ${selected}/${total} 位写者`;
+    }
+}
+
+function selectAllWriters() {
+    const select = getEl('writer-select');
+    if (!select) return;
+    Array.from(select.options).forEach(option => { option.selected = true; });
+    updateWriterSelectionCount();
+}
+
+function clearWritersSelection() {
+    const select = getEl('writer-select');
+    if (!select) return;
+    Array.from(select.options).forEach(option => { option.selected = false; });
+    updateWriterSelectionCount();
 }
 
 async function handleSearch(event) {
@@ -271,7 +371,7 @@ async function handleSearch(event) {
         });
 
         if (data.success) {
-            displaySearchResults(keyword, data.results, data.search_time_ms);
+            displaySearchResults(keyword, data.results, data.search_time_ms, data.epoch);
             const total = getTotalFileCount(data.results);
             const timeMsg = typeof data.search_time_ms === 'number' ? `，检索耗时 ${data.search_time_ms} ms` : '';
             showToast(`检索完成: 找到 ${total} 封匹配邮件${timeMsg}`, 'success');
@@ -312,6 +412,7 @@ async function handleTopNKeywords(event) {
     const selectedOptions = writerSelect ? Array.from(writerSelect.selectedOptions) : [];
     const writerIds = selectedOptions.map(option => parseInt(option.value, 10));
     const writerIdsParam = writerIds.length > 0 ? writerIds : null;
+    const progressEl = getEl('topn-progress');
 
     const submitBtn = event.target.querySelector('button[type="submit"]');
     const btnText = submitBtn.querySelector('.btn-text');
@@ -319,6 +420,7 @@ async function handleTopNKeywords(event) {
     submitBtn.disabled = true;
     btnText.style.display = 'none';
     btnLoading.style.display = 'inline';
+    if (progressEl) progressEl.textContent = `正在分析 ${keywords.length} 个关键词，请稍候...`;
 
     try {
         const tasks = keywords.map(async keyword => {
@@ -375,6 +477,7 @@ async function handleTopNKeywords(event) {
         submitBtn.disabled = false;
         btnText.style.display = 'inline';
         btnLoading.style.display = 'none';
+        if (progressEl && progressEl.textContent.startsWith('正在分析')) progressEl.textContent = '';
     }
 }
 
@@ -407,7 +510,7 @@ function renderTopNResults(totalKeywords, topN, rows) {
     }
 
     const okCount = rows.filter(r => r.ok).length;
-    meta.innerHTML = `<p class="search-meta-text">已分析 <strong>${totalKeywords}</strong> 个关键词，展示 Top <strong>${Math.min(topN, rows.length)}</strong>；成功 <strong>${okCount}</strong> 个。</p>`;
+    meta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 已分析 <strong>${totalKeywords}</strong> 个关键词，展示 Top <strong>${Math.min(topN, rows.length)}</strong>；成功 <strong>${okCount}</strong> 个。</p>`;
 
     content.innerHTML = rows.map((row, idx) => `
         <div class="topn-row">
@@ -505,6 +608,7 @@ function saveCurrentCase() {
         id: Date.now(),
         name: caseName,
         created_at: new Date().toLocaleString(),
+        epoch: activeBatchEpoch,
         search: {
             keyword: keyword,
             selected_writer_ids: getCurrentSelectedWriterIds()
@@ -531,10 +635,15 @@ function applyCase(caseId) {
         showToast('任务单不存在', 'error');
         return;
     }
+    const caseEpoch = parseInt(target.epoch || 1, 10);
+    if (caseEpoch !== activeBatchEpoch) {
+        showToast(`该任务单来自 Epoch ${caseEpoch}，当前为 Epoch ${activeBatchEpoch}。为符合前向隐私，仅回填条件，需要在当前批次重新检索。`, 'info');
+    }
 
     if (getEl('keyword')) getEl('keyword').value = target.search && target.search.keyword ? target.search.keyword : '';
     if (getEl('topn-keywords')) getEl('topn-keywords').value = target.topn && target.topn.keywords_text ? target.topn.keywords_text : '';
     if (getEl('topn-limit')) getEl('topn-limit').value = (target.topn && target.topn.limit) ? target.topn.limit : 10;
+    updateTopNKeywordCount();
 
     const writerSelect = getEl('writer-select');
     if (writerSelect && target.search && Array.isArray(target.search.selected_writer_ids)) {
@@ -548,6 +657,9 @@ function applyCase(caseId) {
 }
 
 function deleteCase(caseId) {
+    if (!window.confirm('确认删除这个任务单吗？此操作不可撤销。')) {
+        return;
+    }
     const next = getStoredCases().filter(c => c.id !== caseId);
     setStoredCases(next);
     renderCaseList();
@@ -556,8 +668,10 @@ function deleteCase(caseId) {
 
 function renderCaseList() {
     const container = getEl('case-list');
+    const countEl = getEl('case-count');
     if (!container) return;
     const cases = getStoredCases();
+    if (countEl) countEl.textContent = `当前已保存 ${cases.length} 个任务单（本地浏览器）`;
     if (cases.length === 0) {
         container.innerHTML = '<div class="empty-state" style="padding: 12px;">暂无任务单，先保存一次当前分析。</div>';
         return;
@@ -567,7 +681,7 @@ function renderCaseList() {
             <div class="case-item-head">
                 <div>
                     <div class="case-item-title">${escapeHtml(c.name)}</div>
-                    <div class="case-item-meta">${escapeHtml(c.created_at || '-')} · 检索词: ${escapeHtml((c.search && c.search.keyword) || '-')}</div>
+                    <div class="case-item-meta">Epoch ${escapeHtml((c.epoch != null ? c.epoch : 1).toString())} · ${escapeHtml(c.created_at || '-')} · 检索词: ${escapeHtml((c.search && c.search.keyword) || '-')}</div>
                 </div>
                 <div class="case-item-actions">
                     <button type="button" class="btn btn-secondary btn-sm" onclick="applyCase(${c.id})">应用</button>
@@ -596,7 +710,7 @@ function exportCasesJson() {
     showToast('任务单 JSON 已导出', 'success');
 }
 
-function displaySearchResults(keyword, results, searchTimeMs) {
+function displaySearchResults(keyword, results, searchTimeMs, epochUsed) {
     const resultsContainer = getEl('search-results');
     const resultsContent = getEl('results-content');
     const searchMeta = getEl('search-meta');
@@ -607,9 +721,15 @@ function displaySearchResults(keyword, results, searchTimeMs) {
     currentSearchResults = Array.isArray(results) ? results : [];
     currentSearchTimeMs = searchTimeMs;
     currentWriterFilter = null;
+    expandedWriterIds = new Set();
+    if (epochUsed != null) {
+        activeBatchEpoch = parseInt(epochUsed, 10) || activeBatchEpoch;
+        const badge = getEl('active-batch-badge');
+        if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+    }
 
     if (typeof searchTimeMs === 'number') {
-        searchMeta.innerHTML = `<p class="search-meta-text">关键字 "<strong>${escapeHtml(keyword)}</strong>" · 亚线性检索耗时 <strong>${searchTimeMs}</strong> ms</p>`;
+        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(keyword)}</strong>" · 亚线性检索耗时 <strong>${searchTimeMs}</strong> ms</p>`;
         searchMeta.style.display = 'block';
     } else {
         searchMeta.innerHTML = '';
@@ -683,7 +803,7 @@ function renderSearchResultsWithFilter() {
 
     if (typeof currentSearchTimeMs === 'number') {
         const filterText = currentWriterFilter == null ? '' : ` · 当前筛选: 员工 ${currentWriterFilter}`;
-        searchMeta.innerHTML = `<p class="search-meta-text">关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · 亚线性检索耗时 <strong>${currentSearchTimeMs}</strong> ms${filterText}</p>`;
+        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · 亚线性检索耗时 <strong>${currentSearchTimeMs}</strong> ms${filterText}</p>`;
         searchMeta.style.display = 'block';
     }
 
@@ -698,15 +818,26 @@ function renderSearchResultsWithFilter() {
     let html = '';
     filteredResults.forEach(result => {
         if (result.file_ids && result.file_ids.length > 0) {
+            const writerId = result.writer_id;
+            const allIds = result.file_ids;
+            const isExpanded = expandedWriterIds.has(writerId);
+            const visibleIds = isExpanded ? allIds : allIds.slice(0, FILE_ID_PREVIEW_LIMIT);
             html += `
                 <div class="result-item">
-                    <h4>员工 ${result.writer_id}</h4>
+                    <h4>员工 ${writerId}</h4>
                     <p>匹配 ${result.file_ids.length} 封邮件，点击邮件ID查看明文内容:</p>
                     <div class="file-ids">
-                        ${result.file_ids.map(id =>
-                            `<span class="file-id-badge" onclick="viewDocument(${result.writer_id - 1}, ${id})" title="点击查看邮件内容">${id}</span>`
+                        ${visibleIds.map(id =>
+                            `<span class="file-id-badge" onclick="viewDocument(${writerId - 1}, ${id})" title="点击查看邮件内容">${id}</span>`
                         ).join('')}
                     </div>
+                    ${allIds.length > FILE_ID_PREVIEW_LIMIT ? `
+                        <div class="file-ids-toggle">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="toggleWriterFileIds(${writerId})">
+                                ${isExpanded ? '收起' : `展开剩余 ${allIds.length - FILE_ID_PREVIEW_LIMIT} 个`}
+                            </button>
+                        </div>
+                    ` : ''}
                 </div>
             `;
         } else {
@@ -735,6 +866,15 @@ function clearWriterFilter() {
     currentWriterFilter = null;
     renderSearchResultsWithFilter();
     renderWriterDistributionChart(currentSearchKeyword, currentSearchResults);
+}
+
+function toggleWriterFileIds(writerId) {
+    if (expandedWriterIds.has(writerId)) {
+        expandedWriterIds.delete(writerId);
+    } else {
+        expandedWriterIds.add(writerId);
+    }
+    renderSearchResultsWithFilter();
 }
 
 function exportWriterDistributionCsv() {
@@ -1021,6 +1161,7 @@ function hideSearchResults() {
     if (chartPanel) chartPanel.style.display = 'none';
     currentWriterFilter = null;
     currentWriterDistributionRows = [];
+    expandedWriterIds = new Set();
 }
 
 function getTotalFileCount(results) {

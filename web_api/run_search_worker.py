@@ -22,12 +22,19 @@ def main():
         data = json.loads(raw)
         keyword = data.get("keyword", "").strip()
         writer_ids = data.get("writer_ids")
+        req_epoch = data.get("epoch")
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
 
     try:
         from config import HERMES_SERVER, HERMES_NUM_WRITERS, HERMES_EPOCH
+        active_epoch = HERMES_EPOCH
+        try:
+            if req_epoch is not None:
+                active_epoch = int(req_epoch)
+        except Exception:
+            active_epoch = HERMES_EPOCH
         from hermes_python_client import HermesClient
     except ImportError as e:
         print(json.dumps({"error": f"Import failed: {e}"}), file=sys.stderr)
@@ -40,7 +47,7 @@ def main():
         client = HermesClient(
             server_address=HERMES_SERVER,
             num_writers=HERMES_NUM_WRITERS,
-            epoch=HERMES_EPOCH,
+            epoch=active_epoch,
         )
         result = client.search(keyword, writer_ids)
         print(json.dumps(result))
