@@ -3,50 +3,835 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hermes - 写者更新</title>
+    <title>Hermes - 写者管理端</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+        .stat-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; }
+        .stat-number { font-size: 2.5em; font-weight: bold; margin: 10px 0; }
+        .keyword-tag { display: inline-block; background: #e0e7ff; color: #3730a3; padding: 4px 12px; margin: 4px; border-radius: 20px; font-size: 0.85em; cursor: pointer; transition: all 0.3s; }
+        .keyword-tag:hover { background: #3730a3; color: white; transform: translateY(-2px); }
+        .keyword-tag.active { background: #dc2626; color: white; }
+        .file-item { border-left: 4px solid #3b82f6; padding: 12px; margin: 8px 0; background: #f8fafc; border-radius: 0 8px 8px 0; transition: all 0.3s; }
+        .file-item:hover { background: #e0f2fe; transform: translateX(5px); }
+        .file-id { font-weight: bold; color: #1e40af; font-size: 0.9em; }
+        .file-path { color: #64748b; font-size: 0.85em; margin-top: 4px; }
+        .file-keywords { margin-top: 6px; }
+        .search-box { display: flex; gap: 10px; margin-bottom: 20px; }
+        .search-input { flex: 1; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 1em; transition: border-color 0.3s; }
+        .search-input:focus { outline: none; border-color: #3b82f6; }
+        .chart-container { position: relative; height: 300px; margin: 20px 0; }
+  
+        .tabs { display: flex; gap: 12px; margin-bottom: 20px; border-bottom: none; }
+        .tab { 
+            padding: 8px 20px; 
+            background-color: #3b82f6; 
+            color: white; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            transition: all 0.2s;
+            font-weight: 500;
+            border: none;
+        }
+        .tab:hover { background-color: #2563eb; transform: translateY(-1px); }
+        .tab.active { background-color: #1e40af; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .keyword-list { max-height: 400px; overflow-y: auto; }
+        .keyword-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid #f1f5f9; cursor: pointer; transition: background 0.2s; }
+        .keyword-item:hover { background: #f8fafc; }
+        .keyword-count { background: #3b82f6; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; }
+        .section-title { font-size: 1.2em; font-weight: 600; color: #1e293b; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; }
+        .badge { background: #f59e0b; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; }
+        .result-message { padding: 12px; border-radius: 8px; margin-top: 10px; }
+        .result-message.success { background: #d1fae5; color: #065f46; border: 1px solid #10b981; }
+        .result-message.error { background: #fee2e2; color: #991b1b; border: 1px solid #ef4444; }
+        .result-message.info { background: #dbeafe; color: #1e40af; border: 1px solid #3b82f6; }
+        .result-message.warning { background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
+
+        .btn-delete-keyword {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: background 0.2s;
+        }
+        .btn-delete-keyword:hover { background-color: #2563eb; }
+
+        .connection-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: 20px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            background: #f1f5f9;
+            font-size: 0.85em;
+        }
+        .status-led {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-led.online { background-color: #10b981; box-shadow: 0 0 4px #10b981; }
+        .status-led.offline { background-color: #ef4444; box-shadow: 0 0 4px #ef4444; }
+        .status-led.unknown { background-color: #94a3b8; }
+        .refresh-status {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1.1em;
+            padding: 0 4px;
+            color: #3b82f6;
+        }
+        .refresh-status:hover { color: #2563eb; }
+    </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Hermes 写者端</h1>
-            <p class="subtitle">写者登录后可更新自己的文件与索引</p>
-            <div style="margin-top: 10px;">
-                <span style="margin-right: 12px; color: #4b5563;">当前账号: {{ user.username }} (writer_id={{ user.writer_id }})</span>
-                <button class="btn btn-secondary btn-sm" onclick="logout()">退出登录</button>
+            <h1>Hermes 写者管理端</h1>
+            <p class="subtitle">管理您的关键字索引与文件关联</p>
+            <div style="margin-top: 10px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+                <div>
+                    <span style="margin-right: 12px; color: #4b5563;">当前账号: {{ user.username }} (writer_id={{ user.writer_id }})</span>
+                    <button class="btn btn-secondary btn-sm" onclick="logout()">退出登录</button>
+                </div>
+                <div class="connection-status" id="connection-status">
+                    <span class="status-led unknown" id="status-led"></span>
+                    <span id="status-text">检查连接中...</span>
+                    <button class="refresh-status" onclick="checkCppConnection()" title="刷新连接状态">↻</button>
+                </div>
             </div>
         </header>
 
-        <div class="card">
-            <h2>更新文件</h2>
-            <p class="card-desc">选择文件 ID，编辑内容后更新：将替换原文件并同步该写者索引。</p>
-            <p class="card-desc" style="margin-bottom: 0.5rem;">
-                C++ 服务：<span id="client-connection-status" class="client-status">检测中...</span>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-reinit-client" onclick="requestReinitClient(); updateClientStatus();" style="margin-left: 8px;">重试连接</button>
-            </p>
-            <p id="client-load-error-hint" class="card-desc client-load-hint" style="display: none; margin-top: 0.25rem; font-size: 0.85rem; color: #6b7280;"></p>
-            <div class="form-group">
-                <label for="doc-update-writer-id">写者 (Writer):</label>
-                <select id="doc-update-writer-id" required></select>
+        <div class="dashboard">
+            <div class="stat-card">
+                <div>关键字总数</div>
+                <div class="stat-number" id="total-keywords">-</div>
+                <div>个独立关键字</div>
             </div>
-            <div class="form-group">
-                <label for="doc-update-file-id">文件 ID:</label>
-                <input type="number" id="doc-update-file-id" placeholder="输入该写者的文件ID..." min="1">
+            <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                <div>关联文件数</div>
+                <div class="stat-number" id="total-files">-</div>
+                <div>个已索引文件</div>
             </div>
-            <div class="form-group">
-                <button type="button" class="btn btn-secondary" id="doc-load-btn" onclick="loadDocumentContent()">加载原文</button>
-                <span id="doc-path-hint" class="optional-hint" style="margin-left: 8px;"></span>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('keywords')" id="tab-keywords">关键字管理</div>
+            <div class="tab" onclick="switchTab('files')" id="tab-files">文件列表</div>
+            <div class="tab" onclick="switchTab('update')" id="tab-update">内容更新</div>
+            <div class="tab" onclick="switchTab('stats')" id="tab-stats">统计分析</div>
+        </div>
+
+        <div id="content-keywords" class="tab-content active">
+            <div class="card">
+                <div class="section-title">
+                    关键字检索
+                    <span class="badge" id="keyword-filter-badge" style="display:none;">已过滤</span>
+                </div>
+                <div class="search-box">
+                    <input type="text" class="search-input" id="keyword-search" placeholder="输入关键字模糊查询（如: sec, uni, proj...）" onkeyup="handleKeywordSearch(event)">
+                    <button class="btn btn-primary" onclick="searchKeywords()">搜索</button>
+                    <button class="btn btn-secondary" onclick="clearKeywordFilter()" id="btn-clear-filter" style="display:none;">清除</button>
+                </div>
+                
+                <div class="section-title" style="margin-top: 20px;">
+                    关键字列表
+                    <small style="color: #94a3b8; font-weight: normal;">点击关键字查看关联文件</small>
+                </div>
+                <div class="keyword-list" id="keyword-list">
+                    <div style="text-align: center; color: #94a3b8; padding: 40px;">加载中...</div>
+                </div>
             </div>
-            <div class="form-group">
-                <label for="doc-update-content">文件内容（更新后关键字可直接检索）:</label>
-                <textarea id="doc-update-content" rows="12" placeholder="加载原文后在此编辑，或直接输入新内容..." style="width: 100%; box-sizing: border-box;"></textarea>
+
+            <div class="card" id="selected-keyword-section" style="display:none; margin-top: 20px;">
+                <div class="section-title">
+                    关键字 "<span id="selected-keyword-name"></span>" 的关联文件
+                    <span class="badge" id="selected-keyword-count">0</span>
+                </div>
+                <div id="selected-keyword-files"></div>
             </div>
-            <button type="button" class="btn btn-success" id="doc-save-btn" onclick="handleSaveDocument()">更新文件</button>
-            <div id="doc-update-result" class="result-message" style="display: none; margin-top: 0.75rem;"></div>
+        </div>
+
+
+        <div id="content-files" class="tab-content">
+            <div class="card">
+                <div class="section-title">
+                    我的文件
+                    <small style="color: #94a3b8; font-weight: normal;">共 <span id="files-total-count">0</span> 个文件</small>
+                </div>
+                <div class="search-box">
+                    <input type="text" class="search-input" id="file-keyword-filter" placeholder="输入关键字过滤文件..." onkeyup="handleFileFilter(event)">
+                    <button class="btn btn-primary" onclick="filterFiles()">过滤</button>
+                </div>
+                <div id="file-list-container" style="max-height: 600px; overflow-y: auto;">
+                    <div style="text-align: center; color: #94a3b8; padding: 40px;">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="content-update" class="tab-content">
+            <div class="card">
+                <h2>更新文件内容</h2>
+                <p class="card-desc">编辑文件内容将自动重建关键字索引，并同步到加密服务端。</p>
+                
+                <div class="form-group">
+                    <label>快速选择文件：</label>
+                    <select id="quick-file-select" onchange="onQuickFileSelect()" style="width: 100%; padding: 8px; margin-bottom: 10px;">
+                        <option value="">-- 选择文件 ID --</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="doc-update-file-id">或手动输入文件 ID:</label>
+                    <input type="number" id="doc-update-file-id" placeholder="输入文件ID..." min="1" style="width: 100%; padding: 8px;">
+                </div>
+
+                <div class="form-group">
+                    <button type="button" class="btn btn-primary" onclick="loadDocumentContent()">加载原文</button>
+                    <span id="doc-path-hint" class="optional-hint" style="margin-left: 8px; color: #64748b;"></span>
+                </div>
+
+                <div class="form-group">
+                    <label for="doc-update-content">文件内容：</label>
+                    <textarea id="doc-update-content" rows="10" placeholder="加载原文后在此编辑..." style="width: 100%; box-sizing: border-box; font-family: monospace;"></textarea>
+                </div>
+
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button type="button" class="btn btn-primary" id="doc-save-btn" onclick="handleSaveDocument()">保存并更新索引</button>
+                    <button type="button" class="btn btn-primary" onclick="previewKeywords()">预览关键字</button>
+                </div>
+
+                <div id="keyword-preview" style="margin-top: 15px; display: none;">
+                    <div style="background: #f0fdf4; border: 1px solid #86efac; padding: 12px; border-radius: 8px;">
+                        <strong>提取的关键字：</strong>
+                        <div id="keyword-preview-list" style="margin-top: 8px;"></div>
+                    </div>
+                </div>
+
+                <div id="doc-update-result" class="result-message" style="display: none; margin-top: 1rem;"></div>
+            </div>
+        </div>
+
+        <div id="content-stats" class="tab-content">
+            <div class="card">
+                <div class="section-title">统计分析 - 关键字分布统计</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <h4 style="text-align: center; color: #475569; margin-bottom: 10px;">关键字关联文件数分布</h4>
+                        <div class="chart-container">
+                            <canvas id="keywordDistChart"></canvas>
+                        </div>
+                    </div>
+                    <div>
+                        <h4 style="text-align: center; color: #475569; margin-bottom: 10px;">文件关键字数量分布</h4>
+                        <div class="chart-container">
+                            <canvas id="fileKwDistChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px;">
+                <div class="section-title">高频关键字 - Top 10</div>
+                <div class="chart-container" style="height: 250px;">
+                    <canvas id="topKeywordsChart"></canvas>
+                </div>
+                <div style="text-align: center; margin-top: 15px;">
+                    <button class="btn btn-primary" onclick="reloadCppIndex()">重新加载索引</button>
+                </div>
+            </div>
         </div>
     </div>
 
     <div id="toast" class="toast"></div>
-    <script src="{{ url_for('static', filename='script.js') }}"></script>
+    
+    <script>
+       
+        let currentWriterId = parseInt("{{ user.writer_id }}") || 0;
+        let allKeywords = [];
+        let allFiles = [];
+        let selectedKeyword = null;
+        let charts = {};
+        let connectionCheckInterval = null;
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        async function checkCppConnection() {
+            try {
+                const res = await fetch('/api/client-status');
+                const data = await res.json();
+                const statusLed = document.getElementById('status-led');
+                const statusText = document.getElementById('status-text');
+                if (data.success && data.connected) {
+                    statusLed.className = 'status-led online';
+                    statusText.textContent = 'C++ 服务已连接';
+                } else {
+                    statusLed.className = 'status-led offline';
+                    statusText.textContent = 'C++ 服务未连接';
+                }
+            } catch (e) {
+                const statusLed = document.getElementById('status-led');
+                const statusText = document.getElementById('status-text');
+                statusLed.className = 'status-led offline';
+                statusText.textContent = '无法获取状态';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('当前写者ID:', currentWriterId, '类型:', typeof currentWriterId);
+            loadKeywords();
+            loadFiles();
+            loadStats();
+            loadQuickFileSelect();
+            checkCppConnection();
+   
+            if (connectionCheckInterval) clearInterval(connectionCheckInterval);
+            connectionCheckInterval = setInterval(checkCppConnection, 30000);
+        });
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            
+            document.getElementById('tab-' + tabName).classList.add('active');
+            document.getElementById('content-' + tabName).classList.add('active');
+            
+            if (tabName === 'stats' && !charts.keywordDist) {
+                setTimeout(initCharts, 100);
+            }
+        }
+
+        async function loadKeywords() {
+            try {
+                const res = await fetch('/api/writer/keywords');
+                const data = await res.json();
+                
+                if (data.success) {
+                    allKeywords = data.keywords;
+                    document.getElementById('total-keywords').textContent = data.total_keywords;
+                    document.getElementById('total-files').textContent = data.total_files;
+                    renderKeywordList(allKeywords);
+                } else {
+                    showToast('加载关键字失败: ' + data.error, 'error');
+                }
+            } catch (e) {
+                showToast('网络错误', 'error');
+            }
+        }
+
+        function renderKeywordList(keywords) {
+            const container = document.getElementById('keyword-list');
+            if (keywords.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #94a3b8; padding: 40px;">暂无关键字数据</div>';
+                return;
+            }
+            
+            container.innerHTML = keywords.map(k => `
+                <div class="keyword-item" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="flex:1; cursor: pointer;" onclick="selectKeyword('${escapeHtml(k.keyword)}', ${JSON.stringify(k.file_ids).replace(/"/g, '&quot;')})">
+                        <span style="font-weight: 500; color: #334155;">${escapeHtml(k.keyword)}</span>
+                        <span class="keyword-count">${k.file_count} 个文件</span>
+                    </div>
+                    <button class="btn-delete-keyword" data-keyword="${escapeHtml(k.keyword)}" onclick="deleteKeyword('${escapeHtml(k.keyword)}')" title="删除该关键字">删除</button>
+                </div>
+            `).join('');
+        }
+
+        async function deleteKeyword(keyword) {
+            if (!confirm(`确定要删除关键词 “${keyword}” 吗？\n该操作会移除该关键词与所有文件的关联，且不可撤销。`)) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/writer/keyword', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ keyword: keyword })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`已删除关键词 “${keyword}”`, 'success');
+                    loadKeywords();
+                    loadFiles();
+                    if (selectedKeyword === keyword) {
+                        document.getElementById('selected-keyword-section').style.display = 'none';
+                        selectedKeyword = null;
+                    }
+                    if (data.warning) showToast(data.warning, 'warning');
+                } else {
+                    showToast('删除失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('网络错误', 'error');
+            }
+        }
+
+        async function reloadCppIndex() {
+            try {
+                const res = await fetch('/api/reload-index', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('索引重新加载成功', 'success');
+                } else {
+                    showToast('重新加载失败: ' + (data.error || ''), 'error');
+                }
+            } catch (e) {
+                showToast('网络错误', 'error');
+            }
+        }
+
+
+        async function searchKeywords() {
+            const query = document.getElementById('keyword-search').value.trim();
+            if (!query) {
+                renderKeywordList(allKeywords);
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/writer/search-own', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({keyword_query: query})
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    renderKeywordList(data.results.map(r => ({
+                        keyword: r.keyword,
+                        file_count: r.file_ids.length,
+                        file_ids: r.file_ids
+                    })));
+                    document.getElementById('btn-clear-filter').style.display = 'inline-block';
+                    document.getElementById('keyword-filter-badge').style.display = 'inline';
+                }
+            } catch (e) {
+                showToast('搜索失败', 'error');
+            }
+        }
+
+        function handleKeywordSearch(e) {
+            if (e.key === 'Enter') searchKeywords();
+        }
+
+        function clearKeywordFilter() {
+            document.getElementById('keyword-search').value = '';
+            document.getElementById('btn-clear-filter').style.display = 'none';
+            document.getElementById('keyword-filter-badge').style.display = 'none';
+            renderKeywordList(allKeywords);
+        }
+
+        function selectKeyword(keyword, fileIds) {
+            selectedKeyword = keyword;
+            document.getElementById('selected-keyword-section').style.display = 'block';
+            document.getElementById('selected-keyword-name').textContent = keyword;
+            document.getElementById('selected-keyword-count').textContent = fileIds.length;
+            
+            const filesHtml = fileIds.map(fid => {
+                const file = allFiles.find(f => f.file_id === fid);
+                const path = file ? file.path : '未知路径';
+                return `
+                    <div class="file-item" onclick="selectFileForEdit(${fid})" style="cursor: pointer;">
+                        <div class="file-id">文件 ID: ${fid}</div>
+                        <div class="file-path">${escapeHtml(path)}</div>
+                    </div>
+                `;
+            }).join('');
+            
+            document.getElementById('selected-keyword-files').innerHTML = filesHtml;
+            document.getElementById('selected-keyword-section').scrollIntoView({behavior: 'smooth'});
+        }
+
+        async function loadFiles(keywordFilter = '') {
+            try {
+                let url = '/api/writer/files';
+                if (keywordFilter) url += '?keyword=' + encodeURIComponent(keywordFilter);
+                
+                const res = await fetch(url);
+                const data = await res.json();
+                
+                if (data.success) {
+                    allFiles = data.files;
+                    document.getElementById('files-total-count').textContent = data.total;
+                    renderFileList(allFiles);
+                }
+            } catch (e) {
+                showToast('加载文件列表失败', 'error');
+            }
+        }
+
+        function renderFileList(files) {
+            const container = document.getElementById('file-list-container');
+            if (files.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #94a3b8; padding: 40px;">暂无文件</div>';
+                return;
+            }
+            
+            container.innerHTML = files.map(f => `
+                <div class="file-item" onclick="selectFileForEdit(${f.file_id})">
+                    <div style="display: flex; justify-content: space-between; align-items: start;">
+                        <div class="file-id">ID: ${f.file_id}</div>
+                        <span style="font-size: 0.8em; color: #64748b;">${f.keyword_count} 个关键字</span>
+                    </div>
+                    <div class="file-path">${escapeHtml(f.path)}</div>
+                    <div class="file-keywords">
+                        ${f.keywords.map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function filterFiles() {
+            const keyword = document.getElementById('file-keyword-filter').value.trim();
+            loadFiles(keyword);
+        }
+
+        function handleFileFilter(e) {
+            if (e.key === 'Enter') filterFiles();
+        }
+
+        function selectFileForEdit(fileId) {
+            switchTab('update');
+            document.getElementById('doc-update-file-id').value = fileId;
+            loadDocumentContent();
+        }
+
+        async function loadQuickFileSelect() {
+            try {
+                const res = await fetch('/api/writer/files');
+                const data = await res.json();
+                if (data.success) {
+                    const select = document.getElementById('quick-file-select');
+                    select.innerHTML = '<option value="">-- 选择文件 ID --</option>' +
+                        data.files.map(f => `<option value="${f.file_id}">ID:${f.file_id} - ${f.path.split('/').pop()}</option>`).join('');
+                }
+            } catch (e) {
+                console.error('加载文件选择器失败', e);
+            }
+        }
+
+        function onQuickFileSelect() {
+            const val = document.getElementById('quick-file-select').value;
+            if (val) {
+                document.getElementById('doc-update-file-id').value = val;
+                loadDocumentContent();
+            }
+        }
+
+        async function loadDocumentContent() {
+            const fileId = document.getElementById('doc-update-file-id').value;
+            if (!fileId) {
+                showToast('请输入文件ID', 'error');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`/api/document-content?writer_id=${currentWriterId}&file_id=${fileId}`);
+                const data = await res.json();
+                
+                const resultDiv = document.getElementById('doc-update-result');
+                const hintSpan = document.getElementById('doc-path-hint');
+                
+                if (data.success) {
+                    document.getElementById('doc-update-content').value = data.content;
+                    hintSpan.textContent = `路径: ${data.path}`;
+                    resultDiv.style.display = 'none';
+                    showToast('原文加载成功', 'success');
+                } else {
+                    hintSpan.textContent = '';
+                    resultDiv.style.display = 'block';
+                    resultDiv.className = 'result-message error';
+                    resultDiv.innerHTML = `<strong>加载失败</strong><br>${escapeHtml(data.error || '未知错误')}<br><small>提示：请确认文件ID ${fileId} 存在</small>`;
+                    showToast('加载失败: ' + (data.error || ''), 'error');
+                }
+            } catch (e) {
+                showToast('加载失败: 网络错误', 'error');
+            }
+        }
+
+        function previewKeywords() {
+            const content = document.getElementById('doc-update-content').value;
+            const stopwords = new Set(['about','above','across','after','afterwards','again','against','all','almost','alone','along','already','also','although','always','am','among','amongst','amount','an','and','another','any','are','around','as','at','back','be','became','because','become','becomes','becoming','been','before','beforehand','behind','being','below','beside','besides','between','beyond','both','but','by','can','cannot','could','down','each','eg','either','else','elsewhere','enough','etc','even','ever','every','everyone','everything','everywhere','except','few','for','former','formerly','from','front','full','further','get','give','go','had','has','have','he','hence','her','here','hereafter','hereby','herein','hereupon','hers','herself','him','himself','his','how','however','hundred','ie','if','in','inc','indeed','into','is','it','its','itself','keep','last','latter','latterly','least','less','made','many','may','me','meanwhile','might','mine','more','moreover','most','mostly','move','much','must','my','myself','name','namely','neither','never','nevertheless','next','no','nobody','none','noone','nor','not','nothing','now','nowhere','of','off','often','on','once','one','only','onto','or','other','others','otherwise','our','ours','ourselves','out','over','own','part','per','perhaps','put','rather','same','see','seem','seemed','seeming','seems','serious','several','she','should','show','side','since','sincere','so','some','somehow','someone','something','sometime','sometimes','somewhere','still','such','system','take','than','that','the','their','them','themselves','then','thence','there','thereafter','thereby','therefore','therein','thereupon','these','they','this','those','though','through','throughout','thru','thus','to','together','too','top','toward','towards','un','under','until','up','upon','us','very','via','was','we','well','were','what','whatever','when','whence','whenever','where','whereafter','whereas','whereby','wherein','whereupon','wherever','whether','which','while','whither','who','whoever','whole','whom','whose','why','will','with','within','without','would','yet','you','your','yours','yourself','yourselves']);
+            
+            const words = content.toLowerCase().match(/\b[a-z]{4,20}\b/g) || [];
+            const keywords = [...new Set(words.filter(w => !stopwords.has(w)))].slice(0, 50);
+            
+            const previewDiv = document.getElementById('keyword-preview');
+            const listDiv = document.getElementById('keyword-preview-list');
+            
+            if (keywords.length > 0) {
+                listDiv.innerHTML = keywords.map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('');
+                previewDiv.style.display = 'block';
+                showToast(`提取到 ${keywords.length} 个关键字`, 'success');
+            } else {
+                listDiv.innerHTML = '<span style="color: #94a3b8;">未提取到有效关键字（需要4-20位纯英文字母，且非停用词）</span>';
+                previewDiv.style.display = 'block';
+                showToast('未提取到有效关键字', 'warning');
+            }
+        }
+
+        async function handleSaveDocument() {
+            const fileId = document.getElementById('doc-update-file-id').value;
+            const content = document.getElementById('doc-update-content').value;
+            
+            if (!fileId) {
+                showToast('请输入文件ID', 'error');
+                document.getElementById('doc-update-file-id').focus();
+                return;
+            }
+            
+            const fileIdNum = parseInt(fileId);
+            if (isNaN(fileIdNum) || fileIdNum < 1) {
+                showToast('文件ID必须是正整数', 'error');
+                return;
+            }
+            
+            if (!content || content.trim().length === 0) {
+                showToast('文件内容不能为空', 'error');
+                document.getElementById('doc-update-content').focus();
+                return;
+            }
+            
+            const keywordCount = (content.toLowerCase().match(/\b[a-z]{4,20}\b/g) || [])
+                .filter(w => !['about','above','across'].includes(w)).length;
+            
+            if (!confirm(`即将保存文件 ID: ${fileIdNum}\n\n内容长度: ${content.length} 字符\n预计关键字: 约 ${keywordCount} 个\n\n这将：\n1. 覆盖原文件内容\n2. 重建关键字索引\n3. 同步到加密服务端\n\n确定要继续吗？`)) {
+                return;
+            }
+            
+            const btn = document.getElementById('doc-save-btn');
+            const originalText = btn.textContent;
+            btn.textContent = '保存中...';
+            btn.disabled = true;
+            
+            const resultDiv = document.getElementById('doc-update-result');
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result-message info';
+            resultDiv.innerHTML = '正在保存文件并更新索引...<br><small>步骤：写入文件 → 重建索引 → 同步服务端</small>';
+            
+            try {
+                const payload = {
+                    writer_id: currentWriterId,
+                    file_id: fileIdNum,
+                    new_content: content
+                };
+                
+                const res = await fetch('/api/update-document', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                
+                let data;
+                try {
+                    data = await res.json();
+                } catch (jsonErr) {
+                    const text = await res.text();
+                    console.error('响应不是有效JSON:', text.substring(0, 200));
+                    throw new Error(`服务器返回无效数据: ${text.substring(0, 100)}`);
+                }
+                
+                if (data.success) {
+                    let serverStatus = data.index_updated_on_server 
+                        ? '服务端索引已同步，可直接检索' 
+                        : '服务端未连接，请稍后点击「重新加载索引」或重启服务';
+                    
+                    let warningHtml = '';
+                    if (data.warning) {
+                        warningHtml = `<div style="margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.5); border-radius: 4px; color: #d97706;">注意: ${escapeHtml(data.warning)}</div>`;
+                    }
+                    
+                    resultDiv.className = 'result-message success';
+                    resultDiv.innerHTML = `
+                        <div style="font-weight: bold; margin-bottom: 8px;">保存成功</div>
+                        <div>${escapeHtml(data.message || '文件已更新')}</div>
+                        <div style="margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.5); border-radius: 4px;">
+                            ${serverStatus}
+                        </div>
+                        ${warningHtml}
+                    `;
+                    showToast('保存成功', 'success');
+                    
+                    setTimeout(() => {
+                        loadKeywords();
+                        loadFiles();
+                        loadStats();
+                        loadQuickFileSelect();
+                    }, 500);
+                } else {
+                    let errorHint = '';
+                    if (data.error && data.error.includes('not allowed')) {
+                        errorHint = '提示：您只能修改自己的文件，请检查文件ID是否正确';
+                    } else if (data.error && data.error.includes('not found')) {
+                        errorHint = '提示：文件不存在，请先在「文件列表」中查看可用的文件ID';
+                    } else if (data.error && data.error.includes('database')) {
+                        errorHint = '提示：索引文件可能损坏，请尝试点击「重新加载索引」或重启服务';
+                    } else {
+                        errorHint = '提示：请检查文件ID是否正确，或尝试先「加载原文」查看文件是否存在';
+                    }
+                    
+                    resultDiv.className = 'result-message error';
+                    resultDiv.innerHTML = `
+                        <div style="font-weight: bold; margin-bottom: 8px;">保存失败</div>
+                        <div>${escapeHtml(data.error || '未知错误')}</div>
+                        <div style="margin-top: 8px; font-size: 0.9em;">${errorHint}</div>
+                    `;
+                    showToast('保存失败: ' + (data.error || ''), 'error');
+                }
+            } catch (e) {
+                console.error('保存异常:', e);
+                resultDiv.className = 'result-message error';
+                resultDiv.innerHTML = `
+                    <div style="font-weight: bold; margin-bottom: 8px;">网络或系统错误</div>
+                    <div>${escapeHtml(e.message || '无法连接到服务器')}</div>
+                    <div style="margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.5); border-radius: 4px; font-size: 0.9em;">
+                        请检查：<br>
+                        1. Flask 服务是否运行 (python app.py)<br>
+                        2. C++ 服务是否已连接（点击「重新加载索引」）<br>
+                        3. 浏览器控制台(F12)查看详细错误<br>
+                        4. 网络连接是否正常
+                    </div>
+                `;
+                showToast('网络错误，请查看控制台', 'error');
+            } finally {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/writer/stats');
+                const data = await res.json();
+                
+                if (data.success) {
+                    window.statsData = data;
+                    if (document.getElementById('content-stats').classList.contains('active')) {
+                        initCharts();
+                    }
+                }
+            } catch (e) {
+                console.error('加载统计失败', e);
+            }
+        }
+
+        function initCharts() {
+            const data = window.statsData;
+            if (!data) return;
+            
+            Object.values(charts).forEach(c => c.destroy());
+            
+            const distCtx = document.getElementById('keywordDistChart').getContext('2d');
+            charts.keywordDist = new Chart(distCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['1个文件', '2-3个文件', '4-10个文件', '10+个文件'],
+                    datasets: [{
+                        label: '关键字数量',
+                        data: [
+                            data.keyword_distribution.single,
+                            data.keyword_distribution.small,
+                            data.keyword_distribution.medium,
+                            data.keyword_distribution.large
+                        ],
+                        backgroundColor: ['#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {legend: {display: false}},
+                    scales: {y: {beginAtZero: true, ticks: {stepSize: 1}}}
+                }
+            });
+            
+            if (data.file_keyword_distribution.length > 0) {
+                const fileDistCtx = document.getElementById('fileKwDistChart').getContext('2d');
+                charts.fileKwDist = new Chart(fileDistCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: data.file_keyword_distribution.map(d => d.keyword_count + '个关键字'),
+                        datasets: [{
+                            data: data.file_keyword_distribution.map(d => d.file_count),
+                            backgroundColor: ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {position: 'right', labels: {boxWidth: 12}}
+                        }
+                    }
+                });
+            }
+            
+            if (data.top_keywords.length > 0) {
+                const topCtx = document.getElementById('topKeywordsChart').getContext('2d');
+                charts.topKeywords = new Chart(topCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: data.top_keywords.map(k => k.keyword),
+                        datasets: [{
+                            label: '关联文件数',
+                            data: data.top_keywords.map(k => k.count),
+                            backgroundColor: '#3b82f6'
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {legend: {display: false}},
+                        scales: {x: {beginAtZero: true}}
+                    }
+                });
+            }
+        }
+
+        async function logout() {
+            try {
+                await fetch('/api/auth/logout', {method: 'POST'});
+                window.location.href = '/login';
+            } catch (e) {
+                window.location.href = '/login';
+            }
+        }
+
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type;
+            toast.style.display = 'block';
+            
+            const colors = {
+                'success': '#10b981',
+                'error': '#ef4444',
+                'warning': '#f59e0b',
+                'info': '#3b82f6'
+            };
+            toast.style.background = colors[type] || colors['info'];
+            
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+    </script>
 </body>
 </html>
