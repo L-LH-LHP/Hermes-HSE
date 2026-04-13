@@ -640,10 +640,9 @@ def search():
             writer_ids = allowed
         else:
             writer_ids = [w for w in writer_ids if w in set(allowed)]
-
         t0 = time.perf_counter()
         active_epoch = _get_active_epoch()
-        # 在子进程中执行搜索（加载 C++ 库），崩溃时仅 worker 退出，主进程返回 500
+   
         worker_path = BASE_DIR / "run_search_worker.py"
         result = None
         if worker_path.exists():
@@ -661,7 +660,6 @@ def search():
                     try:
                         result = json.loads(raw_stdout)
                     except json.JSONDecodeError:
-                        # stdout 可能混入其他输出（如 client 初始化成功提示），取第一个 '{' 起的 JSON
                         start = raw_stdout.find('{')
                         if start >= 0:
                             try:
@@ -750,7 +748,7 @@ def update():
         writer_id = int(data['writer_id'])
         keyword = data['keyword'].strip()
         file_id = int(data['file_id'])
-        file_path = data.get('file_path', "").strip()  # 可选：新文档时填写，用于同步 database_paths
+        file_path = data.get('file_path', "").strip() 
         
         allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
@@ -770,7 +768,7 @@ def update():
                 'error': 'Keyword cannot be empty'
             }), 400
         
-        # 执行索引更新（C++ 客户端发往 Hermes 服务器）
+        
         success = hermes_client.update(writer_id, keyword, file_id)
         
         if not success:
@@ -779,7 +777,6 @@ def update():
                 'error': 'Update operation failed'
             }), 500
 
-        # 同步写入 database：关键字 -> 文件 ID
         db_ok, db_err = sync_database_after_update(writer_id, keyword, file_id)
         if not db_ok:
             return jsonify({
@@ -789,7 +786,7 @@ def update():
                 'database_paths_synced': False,
             }), 200
 
-        # 若提供 file_path（新文档），同步写入 database_paths
+       
         paths_synced = False
         if file_path:
             paths_ok, _ = sync_database_paths_after_update(writer_id, file_id, file_path)
@@ -880,7 +877,7 @@ def update_document():
             return jsonify({'success': False, 'error': f'未在 database_paths 中找到该用户、文件ID 对应路径'}), 404
         if not path.exists():
             return jsonify({'success': False, 'error': f'文件不存在: {path}'}), 404
-        # 1) 在覆盖前读取当前 database，用于「删除」旧关键字映射（标准流程：清理旧搜索映射）
+        # 1) 在覆盖前读取当前 database，用于删除旧关键字映射
         db_path = _database_file_path(writer_id)
         keyword_to_ids_old: dict[str, list[int]] = {}
         if db_path.exists():
@@ -900,7 +897,7 @@ def update_document():
         new_keywords = set(_extract_keywords_from_text(new_content))
         # 2) 物理存储更新：替换原文件内容（文件 ID 不变）
         path.write_text(new_content, encoding='utf-8')
-        # 3) 本地 database 重建（增量或全量）
+        # 3) 本地 database 重建
         ok, err = _rebuild_database_for_writer_incremental(writer_id, file_id, new_content)
         if not ok:
             ok, err = rebuild_database_for_writer(writer_id)
@@ -909,20 +906,18 @@ def update_document():
                 'success': False,
                 'error': f'文件已覆盖，但重建 database 失败: {err}',
             }), 500
-        # 4) 同步到服务端：标准流程「先删旧关键字映射，再建新映射」或（无现有 database 时）全量清空后推送
+        # 4) 同步到服务端
         server_updated = 0
         if getattr(hermes_client, '_initialized', False):
             if keyword_to_ids_old and db_path.exists():
-                # 增量：对不再适用的旧关键字发 op=删除，再对提取出的新关键字发 op=添加
+              
                 to_del_kw = list(old_keywords - new_keywords)
                 if to_del_kw and getattr(hermes_client, 'delete_updates', None):
                     counts_del, file_ids_prev_del = [], []
                     for kw in to_del_kw:
                         ids = keyword_to_ids_old.get(kw, [])
                         try:
-                            # 找出实际的 count（即排除占位符后的索引位置）
-                            # 因为之前可能是 -1 占位，我们需要找到当前这个 file_id 在“真正的链”中的位置
-                            # 幸好这里是获取“旧”映射的位置，old_keywords 里还没替换成 -1
+                           
                             idx = ids.index(file_id)
                         except ValueError:
                             continue
@@ -932,7 +927,6 @@ def update_document():
                         hermes_client.delete_updates(writer_id, to_del_kw, counts_del, file_ids_prev_del)
                 if getattr(hermes_client, 'load_update_state', None):
                     hermes_client.load_update_state(writer_id)
-                # 只对「新出现」的关键字发添加（已在链中的不重复添加）
                 to_add_kw = list(new_keywords - old_keywords)
                 if to_add_kw:
                     kw_add = to_add_kw
@@ -940,7 +934,6 @@ def update_document():
                     if hermes_client.batch_update(writer_id, kw_add, id_add):
                         server_updated = len(kw_add)
             else:
-                # 无现有 database：清空该写者后整份推送
                 if getattr(hermes_client, 'clear_writer', None) and hermes_client.clear_writer(writer_id):
                     getattr(hermes_client, 'reset_update_state', lambda _: None)(writer_id)
                     if db_path.exists():
@@ -1047,8 +1040,261 @@ def get_writers():
             for i in allowed
         ]
     })
+@app.route('/api/writer/keywords', methods=['GET'])
+@_require_roles({"writer"})
+def writer_keywords():
+    """
+    获取当前写者的所有关键字及关联文件列表
+    返回: [{keyword: "xxx", file_ids: [1,2,3], file_count: 3}, ...]
+    """
+    try:
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        
+        db_path = _database_file_path(writer_id)
+        if not db_path.exists():
+            return jsonify({'success': True, 'keywords': [], 'total_keywords': 0})
+        
+        keywords = []
+        for line in db_path.read_text(encoding="utf-8", errors='replace').splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            kw = parts[0]
+            ids = []
+            for s in parts[1:]:
+                try:
+                    fid = int(s)
+                    if fid > 0: 
+                        ids.append(fid)
+                except ValueError:
+                    continue
+            if ids:
+                keywords.append({
+                    'keyword': kw,
+                    'file_ids': ids,
+                    'file_count': len(ids)
+                })
+        
+    
+        keywords.sort(key=lambda x: x['file_count'], reverse=True)
+        
+        return jsonify({
+            'success': True,
+            'writer_id': writer_id,
+            'keywords': keywords,
+            'total_keywords': len(keywords),
+            'total_files': len(set(fid for k in keywords for fid in k['file_ids']))
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/writer/files', methods=['GET'])
+@_require_roles({"writer"})
+def writer_files():
+    """
+    获取当前写者的所有文件列表（带关键字聚合）
+    支持按关键字过滤: ?keyword=xxx
+    """
+    try:
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        filter_keyword = request.args.get('keyword', '').strip().lower()
+        
+        path_file = _database_paths_file_path(writer_id)
+        if not path_file.exists():
+            return jsonify({'success': True, 'files': [], 'total': 0})
+        
+        
+        file_to_keywords = {}
+        db_path = _database_file_path(writer_id)
+        if db_path.exists():
+            for line in db_path.read_text(encoding="utf-8", errors='replace').splitlines():
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                kw = parts[0]
+                if filter_keyword and filter_keyword not in kw.lower():
+                    continue
+                for s in parts[1:]:
+                    try:
+                        fid = int(s)
+                        if fid > 0:
+                            if fid not in file_to_keywords:
+                                file_to_keywords[fid] = []
+                            file_to_keywords[fid].append(kw)
+                    except ValueError:
+                        continue
+        
+        files = []
+        for line in path_file.read_text(encoding="utf-8", errors='replace').splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                file_id = int(parts[0])
+                file_path = parts[1]
+                
+             
+                if filter_keyword and file_id not in file_to_keywords:
+                    continue
+                
+                files.append({
+                    'file_id': file_id,
+                    'path': file_path,
+                    'keywords': file_to_keywords.get(file_id, []),
+                    'keyword_count': len(file_to_keywords.get(file_id, []))
+                })
+            except ValueError:
+                continue
+        
+    
+        files.sort(key=lambda x: x['file_id'])
+        
+        return jsonify({
+            'success': True,
+            'writer_id': writer_id,
+            'files': files,
+            'total': len(files),
+            'filter': filter_keyword if filter_keyword else None
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/writer/stats', methods=['GET'])
+@_require_roles({"writer"})
+def writer_stats():
+    """
+    获取当前写者的关键字统计信息（用于图表展示）
+    返回: 关键字分布、文件关联度等统计数据
+    """
+    try:
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        
+        db_path = _database_file_path(writer_id)
+        if not db_path.exists():
+            return jsonify({
+                'success': True,
+                'keyword_distribution': [],
+                'top_keywords': [],
+                'file_keyword_count': []
+            })
+        
+        keywords = []
+        file_keyword_count = {}  
+        
+        for line in db_path.read_text(encoding="utf-8", errors='replace').splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            kw = parts[0]
+            ids = []
+            for s in parts[1:]:
+                try:
+                    fid = int(s)
+                    if fid > 0:
+                        ids.append(fid)
+                        file_keyword_count[fid] = file_keyword_count.get(fid, 0) + 1
+                except ValueError:
+                    continue
+            if ids:
+                keywords.append({'keyword': kw, 'count': len(ids), 'file_ids': ids})
+
+        top_keywords = sorted(keywords, key=lambda x: x['count'], reverse=True)[:10]
+
+        distribution = {
+            'single': 0,     
+            'small': 0,       
+            'medium': 0,      
+            'large': 0       
+        }
+        for k in keywords:
+            c = k['count']
+            if c == 1:
+                distribution['single'] += 1
+            elif c <= 3:
+                distribution['small'] += 1
+            elif c <= 10:
+                distribution['medium'] += 1
+            else:
+                distribution['large'] += 1
+        
+        # 文件关键字数量分布
+        file_kw_dist = {}
+        for count in file_keyword_count.values():
+            file_kw_dist[count] = file_kw_dist.get(count, 0) + 1
+        
+        return jsonify({
+            'success': True,
+            'writer_id': writer_id,
+            'total_keywords': len(keywords),
+            'total_files_with_keywords': len(file_keyword_count),
+            'top_keywords': top_keywords,
+            'keyword_distribution': distribution,
+            'file_keyword_distribution': [{'keyword_count': k, 'file_count': v} for k, v in sorted(file_kw_dist.items())]
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/writer/search-own', methods=['POST'])
+@_require_roles({"writer"})
+def writer_search_own():
+    """
+    写者搜索自己的关键字（模糊匹配）
+    请求: {"keyword_query": "sec"} 
+    返回匹配的关键字列表及关联文件
+    """
+    try:
+        data = request.get_json()
+        if not data or 'keyword_query' not in data:
+            return jsonify({'success': False, 'error': 'Missing keyword_query'}), 400
+        
+        query = data['keyword_query'].strip().lower()
+        if not query:
+            return jsonify({'success': False, 'error': 'Empty query'}), 400
+        
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        
+        db_path = _database_file_path(writer_id)
+        if not db_path.exists():
+            return jsonify({'success': True, 'results': [], 'query': query})
+        
+        results = []
+        for line in db_path.read_text(encoding="utf-8", errors='replace').splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            kw = parts[0]
+            if query in kw.lower():
+                ids = []
+                for s in parts[1:]:
+                    try:
+                        fid = int(s)
+                        if fid > 0:
+                            ids.append(fid)
+                    except ValueError:
+                        continue
+                if ids:
+                    results.append({
+                        'keyword': kw,
+                        'file_ids': ids,
+                        'match_type': 'exact' if kw.lower() == query else 'partial'
+                    })
+        results.sort(key=lambda x: (0 if x['match_type'] == 'exact' else 1, x['keyword']))
+        
+        return jsonify({
+            'success': True,
+            'query': query,
+            'results': results,
+            'total_matches': len(results)
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 @app.route('/api/document', methods=['POST'])
 @_require_roles({"reader"})
 def get_document():
