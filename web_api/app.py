@@ -1527,8 +1527,194 @@ def get_document():
             'success': False,
             'error': f'Failed to get document: {str(e)}'
         }), 500
+# 写者新建文件 
+@app.route('/api/writer/create-file', methods=['POST'])
+@_require_roles({"writer"})
+def writer_create_file():
+    """
+    写者创建新文件
+    请求: {
+        "path": "可选，相对路径（如 maildir/writer1/new.txt）",
+        "content": "文件内容"
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data or 'content' not in data:
+            return jsonify({'success': False, 'error': 'Missing content'}), 400
 
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        content = data['content']
+        raw_path = data.get('path', '').strip()
 
+        # 1. 确定新文件的 file_id
+        paths_file = _database_paths_file_path(writer_id)
+        existing_ids = set()
+        if paths_file.exists():
+            for line in paths_file.read_text(encoding='utf-8', errors='replace').splitlines():
+                parts = line.strip().split(None, 1)
+                if parts:
+                    try:
+                        existing_ids.add(int(parts[0]))
+                    except ValueError:
+                        continue
+        new_file_id = 1
+        while new_file_id in existing_ids:
+            new_file_id += 1
+
+        # 2. 确定文件存储路径（安全限制：必须在 PROJECT_ROOT 下）
+        if not raw_path:
+            relative_path = f"maildir/writer{writer_id + 1}/doc_{new_file_id}.txt"
+        else:
+            relative_path = raw_path
+        safe_path = Path(PROJECT_ROOT) / relative_path
+        safe_path = safe_path.resolve()
+        if not str(safe_path).startswith(str(PROJECT_ROOT.resolve())):
+            return jsonify({'success': False, 'error': '路径非法，必须在项目根目录内'}), 400
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path.write_text(content, encoding='utf-8')
+
+        # 3. 写入 database_paths
+        with open(paths_file, 'a', encoding='utf-8') as f:
+            f.write(f"{new_file_id} {relative_path}\n")
+
+        # 4. 提取关键字，更新 database 文件（增量）
+        new_keywords = set(_extract_keywords_from_text(content))
+        db_path = _database_file_path(writer_id)
+        keyword_to_ids = {}
+        if db_path.exists():
+            for line in db_path.read_text(encoding='utf-8', errors='replace').splitlines():
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                kw = parts[0]
+                ids = []
+                for s in parts[1:]:
+                    try:
+                        fid = int(s)
+                        if fid > 0:
+                            ids.append(fid)
+                    except ValueError:
+                        continue
+                keyword_to_ids[kw] = ids
+
+        for kw in new_keywords:
+            if kw in keyword_to_ids:
+                if new_file_id not in keyword_to_ids[kw]:
+                    keyword_to_ids[kw].append(new_file_id)
+            else:
+                keyword_to_ids[kw] = [new_file_id]
+
+        lines = []
+        for kw in sorted(keyword_to_ids.keys()):
+            ids_str = " ".join(str(i) for i in keyword_to_ids[kw])
+            lines.append(f"{kw} {ids_str}")
+        db_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding='utf-8')
+
+        # 5. 同步到 C++ 服务端（如果可用）
+        server_updated = 0
+        if getattr(hermes_client, '_initialized', False):
+            keywords_list = list(new_keywords)
+            file_ids_list = [new_file_id] * len(keywords_list)
+            if keywords_list and hermes_client.batch_update(writer_id, keywords_list, file_ids_list):
+                server_updated = len(keywords_list)
+
+        return jsonify({
+            'success': True,
+            'file_id': new_file_id,
+            'path': str(relative_path),
+            'message': f'文件创建成功，ID={new_file_id}，已建立 {len(new_keywords)} 个关键字索引。' +
+                       ('已同步到服务端。' if server_updated else '未连接 C++ 服务，请稍后点击「重新加载索引」。')
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+# 写者删除文件 
+@app.route('/api/writer/delete-file', methods=['POST'])
+@_require_roles({"writer"})
+def writer_delete_file():
+    """
+    删除写者自己的文件（物理文件、映射、关键字索引全部清理）
+    请求: {"file_id": 123}
+    """
+    try:
+        data = request.get_json()
+        if not data or 'file_id' not in data:
+            return jsonify({'success': False, 'error': 'Missing file_id'}), 400
+
+        file_id = int(data['file_id'])
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+
+        # 1. 从 database_paths 中找到文件路径并删除该行
+        paths_file = _database_paths_file_path(writer_id)
+        if not paths_file.exists():
+            return jsonify({'success': False, 'error': 'database_paths 文件不存在'}), 404
+
+        lines = paths_file.read_text(encoding='utf-8', errors='replace').splitlines()
+        new_lines = []
+        file_path = None
+        for line in lines:
+            parts = line.strip().split(None, 1)
+            if len(parts) >= 2 and parts[0] == str(file_id):
+                file_path = parts[1].strip()
+                continue  
+            new_lines.append(line)
+
+        if file_path is None:
+            return jsonify({'success': False, 'error': f'文件 ID {file_id} 不存在'}), 404
+
+        # 2. 删除物理文件
+        project_root = Path(PROJECT_ROOT).resolve()
+        abs_path = (project_root / file_path).resolve()
+        if str(abs_path).startswith(str(project_root)) and abs_path.exists():
+            abs_path.unlink()
+        else:
+            # 路径不安全或文件不存在，仅记录，不阻止删除映射
+            pass
+
+        # 3. 写回 database_paths
+        paths_file.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding='utf-8')
+
+        # 4. 从 database 关键字索引中移除该 file_id
+        db_path = _database_file_path(writer_id)
+        if db_path.exists():
+            db_lines = db_path.read_text(encoding='utf-8', errors='replace').splitlines()
+            new_db_lines = []
+            for line in db_lines:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                kw = parts[0]
+                ids = []
+                for s in parts[1:]:
+                    try:
+                        fid = int(s)
+                        if fid != file_id and fid > 0:  
+                            ids.append(fid)
+                    except ValueError:
+                        continue
+                if ids:  
+                    new_db_lines.append(f"{kw} " + " ".join(str(i) for i in ids))
+            db_path.write_text("\n".join(new_db_lines) + ("\n" if new_db_lines else ""), encoding='utf-8')
+
+        # 5. 同步到 C++ 服务端：清除该 file_id 的所有关键字映射
+        server_cleared = 0
+        if getattr(hermes_client, '_initialized', False):
+            if hasattr(hermes_client, 'delete_file'):
+                server_cleared = hermes_client.delete_file(writer_id, file_id)
+            # 否则提示用户手动重新加载索引
+
+        return jsonify({
+            'success': True,
+            'message': f'文件 ID {file_id} 已删除，索引已更新。' + (
+                '已同步到服务端。' if server_cleared else '未连接 C++ 服务或客户端不支持自动同步，请点击「重新加载索引」。'
+            )
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 if __name__ == '__main__':
     print("Starting Hermes Compliance Audit Web Server (Reader / Auditor API)")
     print(f"  Port: {FLASK_PORT}")
