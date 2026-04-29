@@ -19,14 +19,13 @@
 
         <div id="search-tab" class="tab-content active">
             <div class="card">
-                <h2>审计批次管理</h2>
-                <p class="card-desc">将一次审计工作绑定到固定批次（Epoch）。切换批次后，需要在新批次重新检索，不直接复用旧批次结果。</p>
+                <h2>检索轮次追踪</h2>
+                <p class="card-desc">系统会自动记录同一查询条件的上一次检索结果。再次检索相同关键词和相同写者范围时，会高亮本次新增命中文件。</p>
                 <div class="batch-toolbar">
-                    <div id="active-batch-badge" class="writer-select-count">当前批次 Epoch: -</div>
-                    <input type="number" id="batch-epoch-input" min="1" value="1" style="width: 140px;">
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="switchAuditBatch()">切换批次</button>
+                    <div id="active-batch-badge" class="writer-select-count">检索轮次: 自动记录</div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearSearchSnapshots()">清空轮次基线</button>
                 </div>
-                <div id="batch-switch-hint" class="input-hint" style="margin-top: 8px;"></div>
+                <div id="batch-switch-hint" class="input-hint" style="margin-top: 8px;">这里的“轮次”是前端结果快照对比，不再表示 Hermes 底层 Epoch。</div>
             </div>
 
             <div class="card">
@@ -207,7 +206,7 @@
                     <span class="collapsible-hint">基于 Top-N / 词包命中关系生成</span>
                 </summary>
                 <div class="collapsible-body">
-                    <p class="card-desc">把 Top-N 或审计词包扫描结果转换为“写者-高危文件”节点关系图。写者节点连接其命中的高危文件，便于观察不同写者是否集中命中同一批风险文件或风险主题。</p>
+                    <p class="card-desc">把 Top-N 或审计词包扫描结果转换为“写者-高危文件”节点关系图。文件编号是每个写者内部的局部编号，因此右侧文件节点以“员工 X / 文件 Y”标识；系统会读取命中文件的邮件头，汇总可能的员工间发送/接收线索。</p>
                     <div class="graph-toolbar">
                         <button type="button" class="btn btn-secondary btn-sm" onclick="renderCollusionGraph()">刷新图谱</button>
                         <div id="collusion-graph-meta" class="input-hint">先执行一次多关键词 Top-N 或一键扫描词包后生成图谱。</div>
@@ -215,15 +214,17 @@
                     <div id="collusion-graph-panel" class="collusion-graph-panel">
                         <div class="empty-state" style="padding: 16px;">暂无图谱数据。</div>
                     </div>
+                    <div id="collusion-exchange-summary" class="exchange-summary"></div>
                     <div id="collusion-graph-legend" class="graph-legend" style="display: none;">
                         <span><i class="legend-dot writer"></i>写者</span>
-                        <span><i class="legend-dot file"></i>高危文件</span>
+                        <span><i class="legend-dot file"></i>高危文件（员工/文件ID）</span>
                         <span><i class="legend-dot edge"></i>命中关系</span>
+                        <span><i class="legend-dot exchange"></i>邮件头推断通信</span>
                     </div>
                 </div>
             </details>
 
-            <details id="epoch-diff-collapse" class="collapsible-card">
+            <details id="epoch-diff-collapse" class="collapsible-card" style="display: none;">
                 <summary>
                     <span>扩展分析 · 跨 Epoch 增量审计</span>
                     <span class="collapsible-hint">对比两个批次的新命中文件</span>
@@ -258,7 +259,7 @@
                 </div>
             </details>
 
-            <details id="epoch-trend-collapse" class="collapsible-card">
+            <details id="epoch-trend-collapse" class="collapsible-card" style="display: none;">
                 <summary>
                     <span>扩展分析 · Epoch 关键词趋势追踪</span>
                     <span class="collapsible-hint">观察关键词命中量随批次变化</span>

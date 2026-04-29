@@ -7,9 +7,11 @@ const API_BASE = (typeof window !== 'undefined' && window.location && window.loc
 let currentSearchKeyword = '';
 let currentSearchResults = [];
 let currentSearchTimeMs = null;
+let currentSearchDiffInfo = null;
 let currentWriterFilter = null; // writer_id in backend response (1-based)
 let currentWriterDistributionRows = [];
 let currentTopNRows = [];
+let currentGraphRows = [];
 let currentRiskRows = [];
 const FILE_ID_PREVIEW_LIMIT = 30;
 const GRAPH_FILE_HIT_LIMIT_PER_KEYWORD = 120;
@@ -18,6 +20,7 @@ let activeBatchEpoch = 1;
 let epochTrendChartInstance = null;
 
 const CASE_STORAGE_KEY = 'hermes_reader_cases_v1';
+const SEARCH_SNAPSHOT_STORAGE_KEY = 'hermes_search_snapshots_v1';
 const KEYWORD_PACKS = {
     financial_fraud: {
         label: '财务舞弊排查',
@@ -99,45 +102,15 @@ function initReaderEnhancements() {
 
 async function refreshAuditBatch() {
     const badge = getEl('active-batch-badge');
-    const input = getEl('batch-epoch-input');
     const hint = getEl('batch-switch-hint');
-    try {
-        const data = await apiFetchJson('/api/audit-batch');
-        if (data && data.success) {
-            activeBatchEpoch = parseInt(data.active_epoch, 10) || 1;
-            if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
-            if (input) input.value = String(activeBatchEpoch);
-            if (hint) hint.textContent = `默认批次为 ${data.default_epoch}。切换后请重新执行检索与分析。`;
-            return;
-        }
-    } catch (_) {}
-    if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+    if (badge) badge.textContent = '检索轮次: 自动记录';
+    if (hint) hint.textContent = '再次执行相同查询时，新增命中文件会以红色高亮显示。';
 }
 
 async function switchAuditBatch() {
-    const input = getEl('batch-epoch-input');
     const hint = getEl('batch-switch-hint');
-    const epoch = input ? parseInt(input.value, 10) : NaN;
-    if (isNaN(epoch) || epoch < 1) {
-        showToast('请输入合法的批次 Epoch（>=1）', 'error');
-        return;
-    }
-    const data = await apiFetchJson('/api/audit-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ epoch: epoch }),
-    });
-    if (!data || !data.success) {
-        showToast((data && data.error) ? data.error : '切换批次失败', 'error');
-        return;
-    }
-    activeBatchEpoch = epoch;
-    const badge = getEl('active-batch-badge');
-    if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
-    if (hint) hint.textContent = data.message || '';
-    hideSearchResults();
-    hideTopNResults();
-    showToast(`已切换到 Epoch ${activeBatchEpoch}`, 'success');
+    if (hint) hint.textContent = '当前版本不再手动切换 Epoch；检索轮次由同一查询的连续搜索自动形成。';
+    showToast('检索轮次会自动记录，无需手动切换', 'info');
 }
 
 function bindWriterSelectionUX() {
@@ -607,7 +580,7 @@ function renderBooleanSearchSummary(keywords, mode, combinedRows, perTermRows, e
     const modeText = mode === 'AND' ? '交集 AND' : '并集 OR';
     meta.innerHTML = `
         <p class="search-meta-text">
-            [Epoch ${activeBatchEpoch}] ${modeText} · ${keywords.length} 个独立关键词 Token ·
+            ${modeText} · ${keywords.length} 个独立关键词 Token ·
             命中 <strong>${total}</strong> 封，覆盖 <strong>${writersHit}</strong> 位写者 · 前端总耗时 <strong>${elapsedMs}</strong> ms
         </p>
     `;
@@ -662,7 +635,7 @@ async function handleFuzzySearch(event) {
         const label = `${keyword}（扩展: ${terms.join(', ')}）`;
 
         if (meta) {
-            meta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 原词 "<strong>${escapeHtml(keyword)}</strong>" 扩展为 <strong>${terms.length}</strong> 个精确关键词；成功 <strong>${okCount}</strong> 个；合并后命中 <strong>${total}</strong> 封。</p>`;
+            meta.innerHTML = `<p class="search-meta-text">原词 "<strong>${escapeHtml(keyword)}</strong>" 扩展为 <strong>${terms.length}</strong> 个精确关键词；成功 <strong>${okCount}</strong> 个；合并后命中 <strong>${total}</strong> 封。</p>`;
         }
         displaySearchResults(label, merged, Number(timeMs.toFixed(2)), activeBatchEpoch);
         const collapse = getEl('fuzzy-search-collapse');
@@ -1206,10 +1179,12 @@ async function handleTopNKeywords(event) {
                 return a.keyword.localeCompare(b.keyword);
             });
         const topList = sorted.slice(0, topN);
+        const graphRows = sorted.filter(row => row.ok && row.total > 0);
         currentTopNRows = topList;
+        currentGraphRows = graphRows;
         renderTopNResults(keywords.length, topN, topList);
         renderRiskProfileFromTopN(topList);
-        renderCollusionGraph(topList);
+        await renderCollusionGraph(graphRows);
         showToast(`Top-N 分析完成: 共分析 ${keywords.length} 个关键词`, 'success');
     } catch (error) {
         showToast('Top-N 分析失败: ' + (error.message || String(error)), 'error');
@@ -1275,7 +1250,7 @@ function renderTopNResults(totalKeywords, topN, rows) {
     }
 
     const okCount = rows.filter(r => r.ok).length;
-    meta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 已分析 <strong>${totalKeywords}</strong> 个关键词，展示 Top <strong>${Math.min(topN, rows.length)}</strong>；成功 <strong>${okCount}</strong> 个。</p>`;
+    meta.innerHTML = `<p class="search-meta-text">已分析 <strong>${totalKeywords}</strong> 个关键词，展示 Top <strong>${Math.min(topN, rows.length)}</strong>；成功 <strong>${okCount}</strong> 个。</p>`;
 
     content.innerHTML = rows.map((row, idx) => `
         <div class="topn-row">
@@ -1295,6 +1270,7 @@ function hideTopNResults() {
     if (panel) panel.style.display = 'none';
     if (progressEl) progressEl.textContent = '';
     currentTopNRows = [];
+    currentGraphRows = [];
     renderRiskProfileFromTopN([]);
     renderCollusionGraph([]);
 }
@@ -1355,6 +1331,7 @@ function collectGraphEdgesFromTopN(rows) {
             const key = `${writerId}:${fileId}`;
             if (!edgeMap.has(key)) {
                 edgeMap.set(key, {
+                    fileKey: key,
                     writerId: writerId,
                     fileId: fileId,
                     keywords: new Set(),
@@ -1369,6 +1346,7 @@ function collectGraphEdgesFromTopN(rows) {
 
     return Array.from(edgeMap.values())
         .map(edge => ({
+            fileKey: edge.fileKey,
             writerId: edge.writerId,
             fileId: edge.fileId,
             keywords: Array.from(edge.keywords).sort(),
@@ -1377,57 +1355,232 @@ function collectGraphEdgesFromTopN(rows) {
         .sort((a, b) => b.rankScore - a.rankScore || a.writerId - b.writerId || a.fileId - b.fileId);
 }
 
-function renderCollusionGraph(rows) {
+async function fetchGraphEmailMetadata(edges) {
+    const unique = [];
+    const seen = new Set();
+    (edges || []).forEach(edge => {
+        const writerId = parseInt(edge.writerId, 10);
+        const fileId = parseInt(edge.fileId, 10);
+        if (isNaN(writerId) || isNaN(fileId)) return;
+        const key = `${writerId}:${fileId}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        unique.push({ writer_id: writerId - 1, file_id: fileId });
+    });
+    if (!unique.length) return new Map();
+    try {
+        const data = await apiFetchJson('/api/email-metadata/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ files: unique.slice(0, 300) }),
+        });
+        if (!data || !data.success) return new Map();
+        const map = new Map();
+        (data.metadata || []).forEach(item => {
+            const writerId = parseInt(item.writer_id, 10);
+            const fileId = parseInt(item.file_id, 10);
+            if (!isNaN(writerId) && !isNaN(fileId)) {
+                map.set(`${writerId}:${fileId}`, item);
+            }
+        });
+        return map;
+    } catch (_) {
+        return new Map();
+    }
+}
+
+function summarizeGraphExchanges(edges) {
+    const pairMap = new Map();
+    (edges || []).forEach(edge => {
+        const meta = edge.metadata || {};
+        const owner = parseInt(edge.writerId, 10);
+        const sender = meta.from_writer_id == null ? null : parseInt(meta.from_writer_id, 10);
+        const recipients = Array.isArray(meta.recipient_writer_ids)
+            ? meta.recipient_writer_ids.map(x => parseInt(x, 10)).filter(x => !isNaN(x))
+            : [];
+        const pairs = [];
+
+        if (sender && recipients.length) {
+            recipients.forEach(recipient => {
+                if (recipient !== sender) pairs.push([sender, recipient]);
+            });
+        } else if (sender && sender !== owner) {
+            pairs.push([sender, owner]);
+        } else if (sender && sender === owner && recipients.length) {
+            recipients.forEach(recipient => {
+                if (recipient !== owner) pairs.push([owner, recipient]);
+            });
+        }
+
+        pairs.forEach(([fromWriter, toWriter]) => {
+            const key = `${fromWriter}->${toWriter}`;
+            if (!pairMap.has(key)) {
+                pairMap.set(key, {
+                    fromWriter: fromWriter,
+                    toWriter: toWriter,
+                    count: 0,
+                    keywords: new Set(),
+                    files: [],
+                    subjects: new Set(),
+                });
+            }
+            const row = pairMap.get(key);
+            row.count += 1;
+            (edge.keywords || []).forEach(keyword => row.keywords.add(keyword));
+            row.files.push(`员工 ${edge.writerId}/文件 ${edge.fileId}`);
+            if (meta.subject) row.subjects.add(meta.subject);
+        });
+    });
+
+    return Array.from(pairMap.values())
+        .map(row => ({
+            fromWriter: row.fromWriter,
+            toWriter: row.toWriter,
+            count: row.count,
+            keywords: Array.from(row.keywords).sort(),
+            files: row.files.slice(0, 8),
+            subjects: Array.from(row.subjects).slice(0, 3),
+        }))
+        .sort((a, b) => b.count - a.count || a.fromWriter - b.fromWriter || a.toWriter - b.toWriter);
+}
+
+function renderExchangeSummary(edges) {
+    const container = getEl('collusion-exchange-summary');
+    if (!container) return;
+    const rows = summarizeGraphExchanges(edges).slice(0, 12);
+    if (!rows.length) {
+        container.innerHTML = `
+            <div class="exchange-empty">
+                未能从当前命中文件的邮件头中解析出内部员工之间的发送/接收关系；图谱仍展示写者与高危文件的命中关系。
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="exchange-title">疑似员工通信线索（基于命中文件邮件头）</div>
+        <div class="exchange-table">
+            ${rows.map(row => `
+                <div class="exchange-row">
+                    <div class="exchange-pair">员工 ${row.fromWriter} -> 员工 ${row.toWriter}</div>
+                    <div class="exchange-count">${row.count} 封高危命中邮件</div>
+                    <div class="exchange-keywords">${row.keywords.slice(0, 8).map(k => `<span class="term-chip">${escapeHtml(k)}</span>`).join('')}</div>
+                    <div class="exchange-files">${escapeHtml(row.files.join('，'))}</div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+async function renderCollusionGraph(rows) {
     const panel = getEl('collusion-graph-panel');
     const meta = getEl('collusion-graph-meta');
     const legend = getEl('collusion-graph-legend');
+    const exchangeSummary = getEl('collusion-exchange-summary');
     const collapse = getEl('collusion-graph-collapse');
     if (!panel || !meta) return;
 
-    const sourceRows = Array.isArray(rows) ? rows : currentTopNRows;
+    const sourceRows = Array.isArray(rows) ? rows : (currentGraphRows.length ? currentGraphRows : currentTopNRows);
     const allEdges = collectGraphEdgesFromTopN(sourceRows);
     if (!allEdges.length) {
         panel.innerHTML = '<div class="empty-state" style="padding: 16px;">暂无图谱数据。请先执行一次多关键词 Top-N 或审计词包扫描。</div>';
         meta.textContent = '先执行一次多关键词 Top-N 或一键扫描词包后生成图谱。';
+        if (exchangeSummary) exchangeSummary.innerHTML = '';
         if (legend) legend.style.display = 'none';
         return;
     }
 
-    const fileDegree = {};
+    meta.textContent = '正在读取命中文件邮件头并生成关联图谱...';
+    const metadataMap = await fetchGraphEmailMetadata(allEdges);
     allEdges.forEach(edge => {
-        fileDegree[edge.fileId] = (fileDegree[edge.fileId] || 0) + 1;
+        edge.metadata = metadataMap.get(edge.fileKey) || null;
     });
-    const selectedFiles = Object.keys(fileDegree)
-        .map(fileId => ({ fileId: parseInt(fileId, 10), degree: fileDegree[fileId] }))
-        .sort((a, b) => b.degree - a.degree || a.fileId - b.fileId)
-        .slice(0, 28)
-        .map(item => item.fileId);
+
+    const fileScore = {};
+    const fileInfo = {};
+    allEdges.forEach(edge => {
+        fileScore[edge.fileKey] = (fileScore[edge.fileKey] || 0) + edge.rankScore;
+        fileInfo[edge.fileKey] = {
+            fileKey: edge.fileKey,
+            writerId: edge.writerId,
+            fileId: edge.fileId,
+        };
+    });
+    const allFileRows = Object.keys(fileScore)
+        .map(fileKey => ({ ...fileInfo[fileKey], score: fileScore[fileKey] }))
+        .sort((a, b) => b.score - a.score || a.writerId - b.writerId || a.fileId - b.fileId);
+    const selectedFileKeys = [];
+    const selectedFileKeySet = new Set();
+    const byWriter = new Map();
+    allFileRows.forEach(item => {
+        if (!byWriter.has(item.writerId)) byWriter.set(item.writerId, []);
+        byWriter.get(item.writerId).push(item);
+    });
+    Array.from(byWriter.keys()).sort((a, b) => a - b).forEach(writerId => {
+        byWriter.get(writerId).slice(0, 4).forEach(item => {
+            if (!selectedFileKeySet.has(item.fileKey)) {
+                selectedFileKeySet.add(item.fileKey);
+                selectedFileKeys.push(item.fileKey);
+            }
+        });
+    });
+    allFileRows.forEach(item => {
+        if (selectedFileKeys.length >= 42) return;
+        if (!selectedFileKeySet.has(item.fileKey)) {
+            selectedFileKeySet.add(item.fileKey);
+            selectedFileKeys.push(item.fileKey);
+        }
+    });
+    const selectedFiles = selectedFileKeys.slice(0, 42);
     const selectedFileSet = new Set(selectedFiles);
     const edges = allEdges
-        .filter(edge => selectedFileSet.has(edge.fileId))
+        .filter(edge => selectedFileSet.has(edge.fileKey))
         .slice(0, 90);
 
     const writers = Array.from(new Set(edges.map(edge => edge.writerId))).sort((a, b) => a - b);
-    const files = Array.from(new Set(edges.map(edge => edge.fileId))).sort((a, b) => {
-        const d = (fileDegree[b] || 0) - (fileDegree[a] || 0);
-        return d !== 0 ? d : a - b;
-    });
+    const files = Array.from(new Map(edges.map(edge => [edge.fileKey, {
+        fileKey: edge.fileKey,
+        writerId: edge.writerId,
+        fileId: edge.fileId,
+        score: fileScore[edge.fileKey] || 0,
+        keywords: edge.keywords,
+        metadata: edge.metadata,
+    }])).values())
+        .sort((a, b) => b.score - a.score || a.writerId - b.writerId || a.fileId - b.fileId);
     const height = Math.max(380, Math.min(1320, Math.max(writers.length, files.length) * 42 + 90));
     const writerY = {};
     const fileY = {};
     writers.forEach((writerId, idx) => {
         writerY[writerId] = 60 + idx * ((height - 120) / Math.max(1, writers.length - 1));
     });
-    files.forEach((fileId, idx) => {
-        fileY[fileId] = 60 + idx * ((height - 120) / Math.max(1, files.length - 1));
+    files.forEach((file, idx) => {
+        fileY[file.fileKey] = 60 + idx * ((height - 120) / Math.max(1, files.length - 1));
     });
 
     const svgEdges = edges.map(edge => {
-        const title = `员工 ${edge.writerId} -> 文件 ${edge.fileId}: ${edge.keywords.join(', ')}`;
+        const metaInfo = edge.metadata
+            ? ` | ${edge.metadata.from || 'unknown'} -> ${(edge.metadata.to || []).slice(0, 3).join(', ')} | ${edge.metadata.subject || ''}`
+            : '';
+        const title = `员工 ${edge.writerId} -> 员工 ${edge.writerId} / 文件 ${edge.fileId}: ${edge.keywords.join(', ')}${metaInfo}`;
         return `
-            <line class="graph-edge-line" x1="180" y1="${writerY[edge.writerId].toFixed(2)}" x2="790" y2="${fileY[edge.fileId].toFixed(2)}">
+            <line class="graph-edge-line" x1="180" y1="${writerY[edge.writerId].toFixed(2)}" x2="790" y2="${fileY[edge.fileKey].toFixed(2)}">
                 <title>${escapeHtml(title)}</title>
             </line>
+        `;
+    }).join('');
+
+    const exchangeRowsForSvg = summarizeGraphExchanges(edges)
+        .filter(row => writerY[row.fromWriter] != null && writerY[row.toWriter] != null)
+        .slice(0, 20);
+    const svgExchangeEdges = exchangeRowsForSvg.map((row, idx) => {
+        const y1 = writerY[row.fromWriter];
+        const y2 = writerY[row.toWriter];
+        const offset = 34 + (idx % 4) * 16;
+        const title = `员工 ${row.fromWriter} -> 员工 ${row.toWriter}: ${row.count} 封命中邮件；关键词 ${row.keywords.join(', ')}`;
+        return `
+            <path class="graph-exchange-line" d="M 122 ${y1.toFixed(2)} C ${offset} ${y1.toFixed(2)}, ${offset} ${y2.toFixed(2)}, 122 ${y2.toFixed(2)}">
+                <title>${escapeHtml(title)}</title>
+            </path>
         `;
     }).join('');
 
@@ -1438,12 +1591,17 @@ function renderCollusionGraph(rows) {
         </g>
     `).join('');
 
-    const fileNodes = files.map(fileId => {
-        const degree = fileDegree[fileId] || 0;
+    const fileNodes = files.map(file => {
+        const keywords = Array.isArray(file.keywords) ? file.keywords : [];
+        const metaInfo = file.metadata
+            ? `${file.metadata.from || 'unknown'} -> ${(file.metadata.to || []).slice(0, 3).join(', ')}`
+            : '未解析到邮件头';
+        const title = `员工 ${file.writerId} / 文件 ${file.fileId}: ${keywords.join(', ')} | ${metaInfo}`;
         return `
-            <g class="graph-node file-node" transform="translate(825 ${fileY[fileId].toFixed(2)})">
+            <g class="graph-node file-node" transform="translate(825 ${fileY[file.fileKey].toFixed(2)})">
+                <title>${escapeHtml(title)}</title>
                 <rect x="-22" y="-13" width="44" height="26" rx="7"></rect>
-                <text x="32" y="5">文件 ${fileId} · ${degree} 边</text>
+                <text x="32" y="5">员工 ${file.writerId} / 文件 ${file.fileId} · ${keywords.length} 词</text>
             </g>
         `;
     }).join('');
@@ -1451,14 +1609,19 @@ function renderCollusionGraph(rows) {
     panel.innerHTML = `
         <svg class="collusion-graph-svg" viewBox="0 0 1000 ${height}" role="img" aria-label="跨写者关联图谱">
             <text class="graph-axis-label" x="95" y="26">写者</text>
-            <text class="graph-axis-label" x="790" y="26">高危文件</text>
+            <text class="graph-axis-label" x="760" y="26">高危文件（写者内编号）</text>
+            ${svgExchangeEdges}
             ${svgEdges}
             ${writerNodes}
             ${fileNodes}
         </svg>
     `;
     const truncatedText = allEdges.length > edges.length ? `，已抽样展示 ${edges.length}/${allEdges.length} 条边` : '';
-    meta.textContent = `图谱包含 ${writers.length} 位写者、${files.length} 个高危文件、${edges.length} 条命中关系${truncatedText}。`;
+    const narrowHint = writers.length <= 2
+        ? ' 当前图谱只出现少量写者，通常表示当前写者筛选范围较窄，或本次词包实际只在这些写者邮箱中命中。'
+        : '';
+    meta.textContent = `图谱基于本次扫描中 ${sourceRows.length} 个有命中关键词生成，包含 ${writers.length} 位写者、${files.length} 个高危文件节点、${edges.length} 条命中关系${truncatedText}。文件节点使用“员工/文件ID”；下方通信线索来自命中文件邮件头。${narrowHint}`;
+    renderExchangeSummary(edges);
     if (legend) legend.style.display = 'flex';
     if (collapse && allEdges.length > 0) collapse.open = true;
 }
@@ -1547,6 +1710,7 @@ function restoreTopNCaseSnapshot(target) {
     }
 
     currentTopNRows = rows;
+    currentGraphRows = rows;
     const totalKeywords = parseBatchKeywords(topn.keywords_text || '').length || rows.length;
     let topNLimit = parseInt(topn.limit, 10);
     if (isNaN(topNLimit) || topNLimit < 1) topNLimit = rows.length;
@@ -1714,13 +1878,112 @@ function exportCasesJson() {
     showToast('任务单 JSON 已导出', 'success');
 }
 
+function getSearchSnapshots() {
+    try {
+        const raw = localStorage.getItem(SEARCH_SNAPSHOT_STORAGE_KEY);
+        if (!raw) return {};
+        const data = JSON.parse(raw);
+        return data && typeof data === 'object' ? data : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function setSearchSnapshots(snapshots) {
+    try {
+        localStorage.setItem(SEARCH_SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshots || {}));
+    } catch (_) {}
+}
+
+function clearSearchSnapshots() {
+    try {
+        localStorage.removeItem(SEARCH_SNAPSHOT_STORAGE_KEY);
+    } catch (_) {}
+    currentSearchDiffInfo = null;
+    const hint = getEl('batch-switch-hint');
+    if (hint) {
+        hint.textContent = '已清空检索轮次基线；下一次同条件检索会作为新的对比基线。';
+    }
+    showToast('已清空检索轮次基线', 'success');
+}
+
+function getCurrentWriterScopeKey() {
+    const ids = getCurrentSelectedWriterIds();
+    if (!ids.length) return 'all-authorized';
+    return ids.slice().sort((a, b) => a - b).join(',');
+}
+
+function buildSearchSnapshotKey(queryLabel) {
+    return [
+        String(queryLabel || '').trim().toLowerCase(),
+        getCurrentWriterScopeKey(),
+    ].join('|writers=');
+}
+
+function flattenSearchResultKeys(results) {
+    const keys = [];
+    (results || []).forEach(result => {
+        const writerId = parseInt(result && result.writer_id, 10);
+        if (isNaN(writerId)) return;
+        (result.file_ids || []).forEach(fileId => {
+            const fid = parseInt(fileId, 10);
+            if (!isNaN(fid)) keys.push(`${writerId}:${fid}`);
+        });
+    });
+    return Array.from(new Set(keys)).sort();
+}
+
+function updateSearchSnapshot(queryLabel, results) {
+    const key = buildSearchSnapshotKey(queryLabel);
+    const snapshots = getSearchSnapshots();
+    const previous = snapshots[key] || null;
+    const currentKeys = flattenSearchResultKeys(results);
+    const previousKeys = Array.isArray(previous && previous.fileKeys) ? previous.fileKeys : [];
+    const previousSet = new Set(previousKeys);
+    const newKeys = previous
+        ? currentKeys.filter(item => !previousSet.has(item))
+        : [];
+    const searchRound = previous ? ((parseInt(previous.searchRound, 10) || 1) + 1) : 1;
+
+    snapshots[key] = {
+        query: queryLabel,
+        writerScope: getCurrentWriterScopeKey(),
+        fileKeys: currentKeys,
+        searchRound: searchRound,
+        savedAt: new Date().toISOString(),
+    };
+
+    const entries = Object.entries(snapshots)
+        .sort((a, b) => String(b[1].savedAt || '').localeCompare(String(a[1].savedAt || '')))
+        .slice(0, 120);
+    setSearchSnapshots(Object.fromEntries(entries));
+
+    return {
+        key: key,
+        hasPrevious: !!previous,
+        searchRound: searchRound,
+        previousTotal: previousKeys.length,
+        currentTotal: currentKeys.length,
+        newFileKeys: new Set(newKeys),
+        newCount: newKeys.length,
+    };
+}
+
 function getSearchTimeLabel(keyword) {
     return /^(AND|OR)\(/.test(String(keyword || ''))
         ? '前端联合检索总耗时'
         : '亚线性检索耗时';
 }
 
-function displaySearchResults(keyword, results, searchTimeMs, epochUsed) {
+function getSearchDiffText(diffInfo) {
+    if (!diffInfo) return '';
+    if (!diffInfo.hasPrevious) {
+        return ` · 第 <strong>${diffInfo.searchRound}</strong> 次同条件检索，已保存为后续对比基线`;
+    }
+    return ` · 第 <strong>${diffInfo.searchRound}</strong> 次同条件检索，较上次新增 <strong>${diffInfo.newCount}</strong> 封`;
+}
+
+function displaySearchResults(keyword, results, searchTimeMs, epochUsed, diffInfo = null) {
     const resultsContainer = getEl('search-results');
     const resultsContent = getEl('results-content');
     const searchMeta = getEl('search-meta');
@@ -1730,17 +1993,18 @@ function displaySearchResults(keyword, results, searchTimeMs, epochUsed) {
     currentSearchKeyword = keyword;
     currentSearchResults = Array.isArray(results) ? results : [];
     currentSearchTimeMs = searchTimeMs;
+    currentSearchDiffInfo = diffInfo || updateSearchSnapshot(keyword, currentSearchResults);
     currentWriterFilter = null;
     expandedWriterIds = new Set();
     if (epochUsed != null) {
         activeBatchEpoch = parseInt(epochUsed, 10) || activeBatchEpoch;
         const badge = getEl('active-batch-badge');
-        if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+        if (badge) badge.textContent = '检索轮次: 自动记录';
     }
 
     if (typeof searchTimeMs === 'number') {
         const timeLabel = getSearchTimeLabel(keyword);
-        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(keyword)}</strong>" · ${timeLabel} <strong>${searchTimeMs}</strong> ms</p>`;
+        searchMeta.innerHTML = `<p class="search-meta-text">关键字 "<strong>${escapeHtml(keyword)}</strong>" · ${timeLabel} <strong>${searchTimeMs}</strong> ms${getSearchDiffText(currentSearchDiffInfo)}</p>`;
         searchMeta.style.display = 'block';
     } else {
         searchMeta.innerHTML = '';
@@ -1815,7 +2079,7 @@ function renderSearchResultsWithFilter() {
     if (typeof currentSearchTimeMs === 'number') {
         const filterText = currentWriterFilter == null ? '' : ` · 当前筛选: 员工 ${currentWriterFilter}`;
         const timeLabel = getSearchTimeLabel(currentSearchKeyword);
-        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · ${timeLabel} <strong>${currentSearchTimeMs}</strong> ms${filterText}</p>`;
+        searchMeta.innerHTML = `<p class="search-meta-text">关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · ${timeLabel} <strong>${currentSearchTimeMs}</strong> ms${getSearchDiffText(currentSearchDiffInfo)}${filterText}</p>`;
         searchMeta.style.display = 'block';
     }
 
@@ -1834,13 +2098,16 @@ function renderSearchResultsWithFilter() {
             const allIds = result.file_ids;
             const isExpanded = expandedWriterIds.has(writerId);
             const visibleIds = isExpanded ? allIds : allIds.slice(0, FILE_ID_PREVIEW_LIMIT);
+            const newFileKeys = currentSearchDiffInfo && currentSearchDiffInfo.newFileKeys
+                ? currentSearchDiffInfo.newFileKeys
+                : new Set();
             html += `
                 <div class="result-item">
                     <h4>员工 ${writerId}</h4>
                     <p>匹配 ${result.file_ids.length} 封邮件，读者端仅展示文件ID与加密存储信息:</p>
                     <div class="file-ids">
                         ${visibleIds.map(id =>
-                            `<span class="file-id-badge" onclick="viewDocument(${writerId - 1}, ${id})" title="查看加密存储信息">${id}</span>`
+                            `<span class="file-id-badge ${newFileKeys.has(`${writerId}:${id}`) ? 'search-new-file' : ''}" onclick="viewDocument(${writerId - 1}, ${id})" title="${newFileKeys.has(`${writerId}:${id}`) ? '本次新增命中。' : ''}查看加密存储信息">${id}</span>`
                         ).join('')}
                     </div>
                     ${allIds.length > FILE_ID_PREVIEW_LIMIT ? `
@@ -2078,6 +2345,7 @@ function hideSearchResults() {
     const chartPanel = getEl('writer-dist-panel');
     if (chartPanel) chartPanel.style.display = 'none';
     currentWriterFilter = null;
+    currentSearchDiffInfo = null;
     currentWriterDistributionRows = [];
     expandedWriterIds = new Set();
 }
@@ -2190,7 +2458,7 @@ async function refreshStatus() {
                 <div class="status-item" style="margin-top: 15px;"><strong>云服务器地址:</strong> ${escapeHtml(data.server_address)}</div>
                 <div class="status-item" style="margin-top: 15px;"><strong>云端写者数量:</strong> ${data.num_writers}</div>
                 <div class="status-item" style="margin-top: 15px;"><strong>当前账号可访问写者数:</strong> ${allowedCount}</div>
-                <div class="status-item" style="margin-top: 15px;"><strong>审计阶段 (Epoch):</strong> ${data.epoch != null ? data.epoch : '-'}</div>
+                <div class="status-item" style="margin-top: 15px;"><strong>底层启动 Epoch:</strong> ${data.epoch != null ? data.epoch : '-'}（只读）</div>
                 <div class="status-item" style="margin-top: 15px;"><strong>检索模式:</strong> ${data.search_mode === 'cpp' ? 'C++ 库' : (data.search_mode === 'cli_fallback' ? 'CLI 回退' : '-')}</div>
             `;
         } else {

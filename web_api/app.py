@@ -13,6 +13,8 @@ import time
 import base64
 import json
 import subprocess
+from email.parser import Parser
+from email.utils import getaddresses
 from pathlib import Path
 from functools import wraps
 
@@ -77,6 +79,7 @@ except ImportError:
 app = Flask(__name__, template_folder='templates', static_folder='static')
 CORS(app)
 app.secret_key = os.getenv("HERMES_WEB_SECRET", "hermes-web-dev-secret-change-me")
+_EMAIL_WRITER_MAP_CACHE = None
 
 CLIENT_CONFIG = {
     'server_address': HERMES_SERVER,
@@ -343,6 +346,131 @@ def get_file_path_from_database_paths(writer_id: int, file_id: int):
                 return (PROJECT_ROOT / raw_path).resolve()
             return Path(raw_path)
     return None
+
+
+def _read_email_headers(path: Path, max_bytes: int = 65536):
+    """只读取邮件头部，不返回正文内容。"""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")[:max_bytes]
+    except Exception:
+        return {}
+    header_text = raw.split("\n\n", 1)[0]
+    try:
+        return Parser().parsestr(header_text)
+    except Exception:
+        return {}
+
+
+def _extract_email_addresses(header_value: str):
+    if not header_value:
+        return []
+    addresses = []
+    seen = set()
+    for _, addr in getaddresses([header_value]):
+        addr = (addr or "").strip().lower()
+        if addr and "@" in addr and addr not in seen:
+            seen.add(addr)
+            addresses.append(addr)
+    return addresses
+
+
+def _maildir_folder_from_path(path: Path):
+    try:
+        rel = path.resolve().relative_to(PROJECT_ROOT.resolve())
+        parts = rel.parts
+        if len(parts) >= 2 and parts[0] == "maildir":
+            return parts[1]
+    except Exception:
+        pass
+    return None
+
+
+def _email_to_writer_map(max_files_per_writer: int = 80):
+    """
+    粗略建立 email -> writer_id(0-based) 映射。
+    优先使用各 mailbox 的 sent 类目录里的 From 地址；这是展示同谋图谱用的元数据辅助，
+    不参与 Hermes 密文检索。
+    """
+    global _EMAIL_WRITER_MAP_CACHE
+    if _EMAIL_WRITER_MAP_CACHE is not None:
+        return _EMAIL_WRITER_MAP_CACHE
+
+    mapping = {}
+    n = get_server_num_writers()
+    for writer_id in range(n):
+        path_file = _database_paths_file_path(writer_id)
+        if not path_file.exists():
+            continue
+        scanned = 0
+        lines = path_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        preferred = []
+        fallback = []
+        for line in lines:
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2:
+                continue
+            raw_path = parts[1].strip()
+            if raw_path.startswith("./"):
+                abs_path = (PROJECT_ROOT / raw_path[2:]).resolve()
+            elif not os.path.isabs(raw_path):
+                abs_path = (PROJECT_ROOT / raw_path).resolve()
+            else:
+                abs_path = Path(raw_path)
+            path_text = str(abs_path).lower()
+            if "/sent" in path_text or "_sent" in path_text:
+                preferred.append(abs_path)
+            else:
+                fallback.append(abs_path)
+        for abs_path in preferred + fallback:
+            if scanned >= max_files_per_writer:
+                break
+            if not abs_path.exists():
+                continue
+            headers = _read_email_headers(abs_path)
+            for addr in _extract_email_addresses(headers.get("From", "")):
+                mapping.setdefault(addr, writer_id)
+            scanned += 1
+    _EMAIL_WRITER_MAP_CACHE = mapping
+    return mapping
+
+
+def _email_metadata_for_file(writer_id: int, file_id: int, email_writer_map: dict):
+    path = get_file_path_from_database_paths(writer_id, file_id)
+    if path is None or not path.exists():
+        return None
+    headers = _read_email_headers(path)
+    if not headers:
+        return None
+    from_addrs = _extract_email_addresses(headers.get("From", ""))
+    to_addrs = _extract_email_addresses(headers.get("To", ""))
+    cc_addrs = _extract_email_addresses(headers.get("Cc", "") or headers.get("X-cc", ""))
+    bcc_addrs = _extract_email_addresses(headers.get("Bcc", "") or headers.get("X-bcc", ""))
+    recipient_addrs = list(dict.fromkeys(to_addrs + cc_addrs + bcc_addrs))
+    sender_writer = email_writer_map.get(from_addrs[0]) if from_addrs else None
+    recipient_writers = sorted({
+        email_writer_map[addr]
+        for addr in recipient_addrs
+        if addr in email_writer_map
+    })
+    folder = _maildir_folder_from_path(path)
+    return {
+        "writer_id": writer_id + 1,
+        "writer_index": writer_id,
+        "file_id": file_id,
+        "file_key": f"{writer_id + 1}:{file_id}",
+        "mailbox_folder": folder,
+        "from": from_addrs[0] if from_addrs else "",
+        "from_writer_id": (sender_writer + 1) if sender_writer is not None else None,
+        "to": to_addrs,
+        "cc": cc_addrs,
+        "bcc": bcc_addrs,
+        "recipient_writer_ids": [wid + 1 for wid in recipient_writers],
+        "subject": headers.get("Subject", "") or "",
+        "date": headers.get("Date", "") or "",
+        "message_id": headers.get("Message-ID", "") or "",
+        "in_reply_to": headers.get("In-Reply-To", "") or "",
+        "references": headers.get("References", "") or "",
+    }
 
 
 def rebuild_database_for_writer(writer_id: int):
@@ -1437,6 +1565,55 @@ def get_document():
             'success': False,
             'error': f'Failed to get document: {str(e)}'
         }), 500
+
+
+@app.route('/api/email-metadata/batch', methods=['POST'])
+@_require_roles({"reader"})
+def email_metadata_batch():
+    """
+    为审计图谱批量返回命中文件的邮件头元数据。
+    只读取 From/To/Cc/Bcc/Subject/Date/Message-ID 等头部，不返回邮件正文。
+    请求: {"files": [{"writer_id": 0, "file_id": 123}, ...]}
+    writer_id 使用后端 0-based 编号。
+    """
+    try:
+        data = request.get_json() or {}
+        files = data.get("files", [])
+        if not isinstance(files, list):
+            return jsonify({"success": False, "error": "files must be a list"}), 400
+        if len(files) > 300:
+            files = files[:300]
+
+        allowed = set(_get_user_accessible_writer_ids())
+        email_writer_map = _email_to_writer_map()
+        results = []
+        seen = set()
+        for item in files:
+            try:
+                writer_id = int(item.get("writer_id"))
+                file_id = int(item.get("file_id"))
+            except Exception:
+                continue
+            if writer_id not in allowed or file_id <= 0:
+                continue
+            key = (writer_id, file_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            meta = _email_metadata_for_file(writer_id, file_id, email_writer_map)
+            if meta:
+                results.append(meta)
+
+        return jsonify({
+            "success": True,
+            "metadata": results,
+            "count": len(results),
+            "note": "metadata contains headers only; message body is not returned",
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # 写者新建文件 
 @app.route('/api/writer/create-file', methods=['POST'])
 @_require_roles({"writer"})

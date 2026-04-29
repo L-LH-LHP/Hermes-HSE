@@ -676,6 +676,13 @@ header h1 {
     stroke-width: 1.5;
 }
 
+.graph-exchange-line {
+    fill: none;
+    stroke: rgba(220, 38, 38, 0.62);
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+}
+
 .graph-node text {
     font-size: 13px;
     fill: #334155;
@@ -733,6 +740,62 @@ header h1 {
     background: #94a3b8;
 }
 
+.legend-dot.exchange {
+    background: #dc2626;
+}
+
+.exchange-summary {
+    margin-top: 12px;
+}
+
+.exchange-title {
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 8px;
+}
+
+.exchange-table {
+    display: grid;
+    gap: 8px;
+}
+
+.exchange-row {
+    display: grid;
+    grid-template-columns: 160px 150px minmax(180px, 1fr) minmax(220px, 1.2fr);
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #fcfdff;
+}
+
+.exchange-pair {
+    font-weight: 700;
+    color: #1d4ed8;
+}
+
+.exchange-count,
+.exchange-files {
+    color: #64748b;
+    font-size: 0.9rem;
+}
+
+.exchange-keywords {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.exchange-empty {
+    padding: 10px 12px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 0.92rem;
+}
+
 .epoch-form-grid {
     display: grid;
     grid-template-columns: minmax(220px, 1fr) 150px 150px;
@@ -776,6 +839,33 @@ header h1 {
 }
 
 .file-id-badge.epoch-new-file:hover {
+    background: #991b1b !important;
+}
+
+.file-id-badge.search-new-file {
+    background: #dc2626 !important;
+    box-shadow: 0 3px 10px rgba(220, 38, 38, 0.28);
+    position: relative;
+}
+
+.file-id-badge.search-new-file::after {
+    content: "新";
+    position: absolute;
+    top: -9px;
+    right: -8px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 3px;
+    border-radius: 999px;
+    background: #fbbf24;
+    color: #7f1d1d;
+    font-size: 10px;
+    line-height: 16px;
+    font-weight: 800;
+    text-align: center;
+}
+
+.file-id-badge.search-new-file:hover {
     background: #991b1b !important;
 }
 
@@ -1123,6 +1213,11 @@ header h1 {
 
     .collusion-graph-panel {
         max-height: 520px;
+    }
+
+    .exchange-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
     }
 
     .epoch-form-grid {
