@@ -64,6 +64,72 @@
                 <div id="results-content"></div>
             </div>
 
+            <details id="boolean-search-collapse" class="collapsible-card">
+                <summary>
+                    <span>多关键词联合检索</span>
+                    <span class="collapsible-hint">客户端计算 AND / OR</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">为每个关键词分别发起 Hermes 精确检索，并仅在浏览器端计算交集或并集。适合定位同时包含多个风险词的邮件。</p>
+                    <form id="boolean-search-form" onsubmit="handleBooleanSearch(event)">
+                        <div class="form-group">
+                            <label for="boolean-keywords">关键词列表</label>
+                            <textarea id="boolean-keywords" class="keyword-textarea" rows="4" placeholder="例如：Enron, Fraud, Q3&#10;也可以每行输入一个关键词"></textarea>
+                            <div id="boolean-keyword-count" class="input-hint">当前将检索 0 个唯一关键词</div>
+                        </div>
+                        <div class="form-group">
+                            <label>联合方式</label>
+                            <div class="boolean-mode-group" role="radiogroup" aria-label="联合方式">
+                                <label class="boolean-mode-option">
+                                    <input type="radio" name="boolean-mode" value="AND" checked>
+                                    <span>AND 交集</span>
+                                </label>
+                                <label class="boolean-mode-option">
+                                    <input type="radio" name="boolean-mode" value="OR">
+                                    <span>OR 并集</span>
+                                </label>
+                            </div>
+                            <div class="input-hint">沿用上方“选择写者范围”。不选写者时，对全部已授权写者检索。</div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <span class="btn-text">联合检索</span>
+                            <span class="btn-loading" style="display: none;">检索中...</span>
+                        </button>
+                    </form>
+                    <div id="boolean-search-results" class="results-container boolean-results" style="display: none;">
+                        <div id="boolean-search-progress" class="input-hint" style="margin-bottom: 8px;"></div>
+                        <div id="boolean-search-meta" class="search-meta"></div>
+                        <div id="boolean-search-terms" class="term-chip-list"></div>
+                        <div id="boolean-search-detail"></div>
+                    </div>
+                </div>
+            </details>
+
+            <details id="fuzzy-search-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 客户端模糊/词根扩展检索</span>
+                    <span class="collapsible-hint">本地扩展后执行多次精确检索</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">在可信读者端把输入词扩展为常见形态变体，再分别发起 Hermes 精确关键词检索，并在浏览器端合并去重。底层协议仍保持精确检索，不引入服务器端模糊匹配泄漏。</p>
+                    <form id="fuzzy-search-form" onsubmit="handleFuzzySearch(event)">
+                        <div class="form-group">
+                            <label for="fuzzy-keyword">风险关键词</label>
+                            <input type="text" id="fuzzy-keyword" placeholder="例如: bribe, corrupt, launder">
+                        </div>
+                        <div id="fuzzy-expansion-preview" class="input-hint">输入后将自动生成扩展词。</div>
+                        <button type="submit" class="btn btn-primary">
+                            <span class="btn-text">扩展并检索</span>
+                            <span class="btn-loading" style="display: none;">检索中...</span>
+                        </button>
+                    </form>
+                    <div id="fuzzy-search-summary" class="results-container fuzzy-results" style="display: none;">
+                        <div id="fuzzy-search-meta" class="search-meta"></div>
+                        <div id="fuzzy-search-terms" class="term-chip-list"></div>
+                    </div>
+                </div>
+            </details>
+
             <details id="writer-dist-collapse" class="collapsible-card">
                 <summary>
                     <span>扩展分析 · 写者分布柱状图</span>
@@ -135,6 +201,99 @@
                 </div>
             </details>
 
+            <details id="collusion-graph-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 跨写者关联图谱</span>
+                    <span class="collapsible-hint">基于 Top-N / 词包命中关系生成</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">把 Top-N 或审计词包扫描结果转换为“写者-高危文件”节点关系图。写者节点连接其命中的高危文件，便于观察不同写者是否集中命中同一批风险文件或风险主题。</p>
+                    <div class="graph-toolbar">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="renderCollusionGraph()">刷新图谱</button>
+                        <div id="collusion-graph-meta" class="input-hint">先执行一次多关键词 Top-N 或一键扫描词包后生成图谱。</div>
+                    </div>
+                    <div id="collusion-graph-panel" class="collusion-graph-panel">
+                        <div class="empty-state" style="padding: 16px;">暂无图谱数据。</div>
+                    </div>
+                    <div id="collusion-graph-legend" class="graph-legend" style="display: none;">
+                        <span><i class="legend-dot writer"></i>写者</span>
+                        <span><i class="legend-dot file"></i>高危文件</span>
+                        <span><i class="legend-dot edge"></i>命中关系</span>
+                    </div>
+                </div>
+            </details>
+
+            <details id="epoch-diff-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · 跨 Epoch 增量审计</span>
+                    <span class="collapsible-hint">对比两个批次的新命中文件</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">选择两个审计批次，对同一关键词执行检索并计算新批次相对旧批次的新增文件集合。适合月度合规排查中只关注新增风险线索。</p>
+                    <form id="epoch-diff-form" onsubmit="handleEpochDiff(event)">
+                        <div class="epoch-form-grid">
+                            <div class="form-group">
+                                <label for="epoch-diff-keyword">高风险关键词</label>
+                                <input type="text" id="epoch-diff-keyword" placeholder="例如: fraud, deal, confidential">
+                            </div>
+                            <div class="form-group">
+                                <label for="epoch-diff-old">基准 Epoch</label>
+                                <input type="number" id="epoch-diff-old" min="1" value="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="epoch-diff-new">对比 Epoch</label>
+                                <input type="number" id="epoch-diff-new" min="1" value="2">
+                            </div>
+                        </div>
+                        <div class="input-hint">默认沿用上方“选择写者范围”。不选写者时，对全部已授权写者做差异审计。</div>
+                        <button type="submit" class="btn btn-primary">
+                            <span class="btn-text">执行增量审计</span>
+                            <span class="btn-loading" style="display: none;">对比中...</span>
+                        </button>
+                    </form>
+                    <div id="epoch-diff-results" class="results-container epoch-results" style="display: none;">
+                        <div id="epoch-diff-meta" class="search-meta"></div>
+                        <div id="epoch-diff-content"></div>
+                    </div>
+                </div>
+            </details>
+
+            <details id="epoch-trend-collapse" class="collapsible-card">
+                <summary>
+                    <span>扩展分析 · Epoch 关键词趋势追踪</span>
+                    <span class="collapsible-hint">观察关键词命中量随批次变化</span>
+                </summary>
+                <div class="collapsible-body">
+                    <p class="card-desc">输入一个高危关键词和 Epoch 范围，系统会逐批次检索并绘制命中文件数量趋势。适合长期合规监控与政策前后变化观察。</p>
+                    <form id="epoch-trend-form" onsubmit="handleEpochTrend(event)">
+                        <div class="epoch-form-grid">
+                            <div class="form-group">
+                                <label for="epoch-trend-keyword">追踪关键词</label>
+                                <input type="text" id="epoch-trend-keyword" placeholder="例如: Project Raptor, fraud, offshore">
+                            </div>
+                            <div class="form-group">
+                                <label for="epoch-trend-start">起始 Epoch</label>
+                                <input type="number" id="epoch-trend-start" min="1" value="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="epoch-trend-end">结束 Epoch</label>
+                                <input type="number" id="epoch-trend-end" min="1" value="10">
+                            </div>
+                        </div>
+                        <div class="input-hint">最多一次分析 30 个 Epoch，避免长时间占用检索服务。</div>
+                        <button type="submit" class="btn btn-primary">
+                            <span class="btn-text">生成趋势图</span>
+                            <span class="btn-loading" style="display: none;">分析中...</span>
+                        </button>
+                    </form>
+                    <div id="epoch-trend-results" class="results-container epoch-results" style="display: none;">
+                        <div id="epoch-trend-meta" class="search-meta"></div>
+                        <canvas id="epoch-trend-chart" class="epoch-trend-chart" height="260"></canvas>
+                        <div id="epoch-trend-table" class="epoch-trend-table"></div>
+                    </div>
+                </div>
+            </details>
+
             <details id="case-collapse" class="collapsible-card">
                 <summary>
                     <span>扩展分析 · 审计任务单 Case</span>
@@ -148,6 +307,7 @@
                         <button type="button" class="btn btn-secondary btn-sm" onclick="exportCasesJson()">导出任务单 JSON</button>
                     </div>
                     <div id="case-count" class="input-hint" style="margin-top: 8px;"></div>
+                    <div id="case-apply-hint" class="input-hint" style="margin-top: 8px;"></div>
                     <div id="case-list" class="case-list"></div>
                 </div>
             </details>

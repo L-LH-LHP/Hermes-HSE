@@ -613,7 +613,7 @@ def search():
     }
     """
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         
         if not data or 'keyword' not in data:
             return jsonify({
@@ -1361,24 +1361,21 @@ def writer_search_own():
 @_require_roles({"reader"})
 def get_document():
     """
-    获取邮件文档：decrypt=false 仅返回加密内容，decrypt=true 返回解密后原文。
+    读者获取邮件定位信息：仅返回加密内容或密文占位，不返回明文。
     
     请求格式:
     {
         "writer_id": 0,
         "file_id": 1,
-        "decrypt": false   // 可选，默认 true；false=仅返回密文，true=返回明文
+        "decrypt": false   // 可选；读者端即使传 true 也会被拒绝
     }
     
-    返回（decrypt=false）:
+    返回:
     { "success": true, "encrypted": true, "content": "base64密文", "iv": "base64", "size": N }
     或占位: { "success": true, "encrypted": true, "placeholder": true, "message": "..." }
-    
-    返回（decrypt=true）:
-    { "success": true, "content": "邮件内容...", "encoding": "utf-8", "size": N }
     """
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         
         required_fields = ['writer_id', 'file_id']
         for field in required_fields:
@@ -1390,7 +1387,7 @@ def get_document():
         
         writer_id = int(data['writer_id'])
         file_id = int(data['file_id'])
-        decrypt = data.get('decrypt', True)
+        decrypt = bool(data.get('decrypt', False))
 
         allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
@@ -1406,115 +1403,28 @@ def get_document():
                 'error': f'writer_id must be between 0 and {num_writers-1}'
             }), 400
 
+        if decrypt:
+            return jsonify({
+                'success': False,
+                'error': '读者无权解密或查看邮件明文。读者端仅返回文件ID和加密存储信息。'
+            }), 403
+
         # 仅返回加密内容（密文 + IV），不解密
-        if not decrypt:
-            enc = hermes_client.get_encrypted_document(writer_id, file_id)
-            if enc:
-                ciphertext, iv = enc
-                return jsonify({
-                    'success': True,
-                    'encrypted': True,
-                    'content': base64.b64encode(ciphertext).decode('ascii'),
-                    'iv': base64.b64encode(iv).decode('ascii'),
-                    'size': len(ciphertext),
-                })
+        enc = hermes_client.get_encrypted_document(writer_id, file_id)
+        if enc:
+            ciphertext, iv = enc
             return jsonify({
                 'success': True,
                 'encrypted': True,
-                'placeholder': True,
-                'message': '（未找到加密存储，点击「解密」查看原文）',
+                'content': base64.b64encode(ciphertext).decode('ascii'),
+                'iv': base64.b64encode(iv).decode('ascii'),
+                'size': len(ciphertext),
             })
-
-        # 以下为解密后原文：优先从 maildir 读取，失败时尝试 C++ 解密
-        from pathlib import Path
-        import os
-        
-        # extract_database.go 中 userID 从1开始，所以映射文件是 {writer_id+1}.txt
-        mapping_file = Path(__file__).parent.parent / "database_paths" / f"{writer_id + 1}.txt"
-        
-        # 尝试多个可能的路径
-        if not mapping_file.exists():
-            mapping_file = Path("../database_paths") / f"{writer_id + 1}.txt"
-        if not mapping_file.exists():
-            mapping_file = Path("database_paths") / f"{writer_id + 1}.txt"
-        
-        if not mapping_file.exists():
-            return jsonify({
-                'success': False,
-                'error': f'Mapping file not found for writer_id={writer_id}. Please run extract_database.go first.'
-            }), 404
-        
-        # 读取映射文件，查找对应的fileID
-        file_path = None
-        try:
-            with open(mapping_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split(' ', 1)  # 分割为 fileID 和 filePath
-                    if len(parts) == 2:
-                        fid_str, fpath = parts
-                        if int(fid_str) == file_id:
-                            file_path = fpath
-                            break
-        except Exception as e:
-            return jsonify({
-                'success': False,
-                'error': f'Failed to read mapping file: {str(e)}'
-            }), 500
-        
-        if file_path is None:
-            return jsonify({
-                'success': False,
-                'error': f'File ID {file_id} not found in mapping for writer_id={writer_id}'
-            }), 404
-        
-        # 读取原始邮件文件
-        # 邮件文件可能使用多种编码，尝试多种方式
-        mail_path = Path(file_path)
-        if not mail_path.exists():
-            # 尝试相对路径
-            mail_path = Path(__file__).parent.parent / file_path
-        if not mail_path.exists():
-            mail_path = Path("../") / file_path
-        
-        if not mail_path.exists():
-            return jsonify({
-                'success': False,
-                'error': f'Mail file not found: {file_path}. Please check if maildir is in the correct location.'
-            }), 404
-        
-        # 读取邮件内容（尝试多种编码）
-        content = None
-        encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
-        
-        for encoding in encodings:
-            try:
-                with open(mail_path, 'r', encoding=encoding, errors='replace') as f:
-                    content = f.read()
-                    break
-            except Exception:
-                continue
-        
-        if content is None:
-            # 如果所有编码都失败，尝试二进制读取
-            try:
-                with open(mail_path, 'rb') as f:
-                    raw_content = f.read()
-                    # 尝试解码为UTF-8，忽略错误
-                    content = raw_content.decode('utf-8', errors='replace')
-            except Exception as e:
-                return jsonify({
-                    'success': False,
-                    'error': f'Failed to read mail file: {str(e)}'
-                }), 500
-        
         return jsonify({
             'success': True,
-            'writer_id': writer_id,
-            'file_id': file_id,
-            'content': content,
-            'encoding': 'utf-8',
-            'size': len(content),
-            'file_path': str(mail_path)  # 用于调试
+            'encrypted': True,
+            'placeholder': True,
+            'message': '未找到加密存储；读者端仅保留该文件ID作为检索命中线索，不提供原文查看。',
         })
         
     except ValueError as e:

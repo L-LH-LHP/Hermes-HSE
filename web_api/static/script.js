@@ -12,8 +12,10 @@ let currentWriterDistributionRows = [];
 let currentTopNRows = [];
 let currentRiskRows = [];
 const FILE_ID_PREVIEW_LIMIT = 30;
+const GRAPH_FILE_HIT_LIMIT_PER_KEYWORD = 120;
 let expandedWriterIds = new Set();
 let activeBatchEpoch = 1;
+let epochTrendChartInstance = null;
 
 const CASE_STORAGE_KEY = 'hermes_reader_cases_v1';
 const KEYWORD_PACKS = {
@@ -29,6 +31,26 @@ const KEYWORD_PACKS = {
         label: '数据泄露风险',
         keywords: ['attachment', 'forward', 'external', 'download', 'client list', 'password', 'account', 'export', 'private', 'leak']
     }
+};
+
+const FUZZY_EXPANSION_MAP = {
+    bribe: ['bribe', 'bribes', 'bribed', 'bribing', 'bribery'],
+    bribery: ['bribery', 'bribe', 'bribes', 'bribing'],
+    corrupt: ['corrupt', 'corrupts', 'corrupted', 'corrupting', 'corruption', 'corruptly'],
+    corruption: ['corruption', 'corrupt', 'corrupted', 'corrupting'],
+    fraud: ['fraud', 'frauds', 'fraudulent', 'fraudulently'],
+    launder: ['launder', 'launders', 'laundered', 'laundering'],
+    leak: ['leak', 'leaks', 'leaked', 'leaking', 'leakage'],
+    embezzle: ['embezzle', 'embezzles', 'embezzled', 'embezzling', 'embezzlement'],
+    extort: ['extort', 'extorts', 'extorted', 'extorting', 'extortion'],
+    kickback: ['kickback', 'kickbacks'],
+    payoff: ['payoff', 'payoffs'],
+    insider: ['insider', 'insiders', 'inside'],
+    trade: ['trade', 'trades', 'traded', 'trading'],
+    deal: ['deal', 'deals', 'dealing', 'dealt'],
+    transfer: ['transfer', 'transfers', 'transferred', 'transferring'],
+    guarantee: ['guarantee', 'guarantees', 'guaranteed', 'guaranteeing'],
+    offshore: ['offshore', 'offshoring'],
 };
 
 function getEl(id) {
@@ -69,6 +91,8 @@ function initReaderEnhancements() {
     initKeywordPackSelect();
     bindWriterSelectionUX();
     bindTopNInputPreview();
+    bindBooleanKeywordPreview();
+    bindFuzzyExpansionPreview();
     refreshAuditBatch();
     renderCaseList();
 }
@@ -129,12 +153,34 @@ function bindTopNInputPreview() {
     updateTopNKeywordCount();
 }
 
+function bindBooleanKeywordPreview() {
+    const textarea = getEl('boolean-keywords');
+    if (!textarea) return;
+    textarea.addEventListener('input', updateBooleanKeywordCount);
+    updateBooleanKeywordCount();
+}
+
+function bindFuzzyExpansionPreview() {
+    const input = getEl('fuzzy-keyword');
+    if (!input) return;
+    input.addEventListener('input', updateFuzzyExpansionPreview);
+    updateFuzzyExpansionPreview();
+}
+
 function updateTopNKeywordCount() {
     const textarea = getEl('topn-keywords');
     const hint = getEl('topn-keyword-count');
     if (!textarea || !hint) return;
     const count = parseBatchKeywords(textarea.value).length;
     hint.textContent = `当前将分析 ${count} 个唯一关键词`;
+}
+
+function updateBooleanKeywordCount() {
+    const textarea = getEl('boolean-keywords');
+    const hint = getEl('boolean-keyword-count');
+    if (!textarea || !hint) return;
+    const count = parseBooleanKeywords(textarea.value).length;
+    hint.textContent = `当前将检索 ${count} 个唯一关键词`;
 }
 
 function initKeywordPackSelect() {
@@ -343,6 +389,689 @@ function clearWritersSelection() {
     updateWriterSelectionCount();
 }
 
+function buildKeywordExpansions(rawKeyword) {
+    const base = String(rawKeyword || '').trim().toLowerCase();
+    if (!base) return [];
+
+    const forms = new Set([base]);
+    const mapped = FUZZY_EXPANSION_MAP[base];
+    if (mapped) {
+        mapped.forEach(term => forms.add(term.toLowerCase()));
+    }
+
+    // For phrases, avoid unsafe suffix expansion; exact phrase variants should be explicit in the map.
+    if (/\s/.test(base)) {
+        return Array.from(forms).slice(0, 12);
+    }
+
+    if (base.length > 3) {
+        forms.add(`${base}s`);
+        if (base.endsWith('e')) {
+            forms.add(`${base}d`);
+            forms.add(`${base.slice(0, -1)}ing`);
+        } else if (base.endsWith('y')) {
+            forms.add(`${base.slice(0, -1)}ies`);
+            forms.add(`${base.slice(0, -1)}ied`);
+        } else {
+            forms.add(`${base}ed`);
+            forms.add(`${base}ing`);
+        }
+    }
+
+    return Array.from(forms)
+        .filter(term => term.length > 1)
+        .slice(0, 12);
+}
+
+function updateFuzzyExpansionPreview() {
+    const input = getEl('fuzzy-keyword');
+    const preview = getEl('fuzzy-expansion-preview');
+    if (!input || !preview) return;
+    const terms = buildKeywordExpansions(input.value);
+    if (!terms.length) {
+        preview.textContent = '输入后将自动生成扩展词。';
+        return;
+    }
+    preview.innerHTML = `将检索 ${terms.length} 个精确关键词：${terms.map(term => `<span class="term-chip">${escapeHtml(term)}</span>`).join('')}`;
+}
+
+async function searchCurrentEpochKeyword(keyword, writerIdsParam) {
+    const data = await apiFetchJson('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            keyword: keyword,
+            writer_ids: writerIdsParam
+        })
+    });
+    if (!data || !data.success) {
+        throw new Error((data && data.error) ? data.error : `关键词 ${keyword} 检索失败`);
+    }
+    return data;
+}
+
+function mergeSearchResponses(responses) {
+    const writerMap = new Map();
+    responses.forEach(item => {
+        const term = item.term;
+        ((item.data && item.data.results) || []).forEach(result => {
+            const writerId = parseInt(result && result.writer_id, 10);
+            if (isNaN(writerId)) return;
+            if (!writerMap.has(writerId)) writerMap.set(writerId, new Map());
+            const fileMap = writerMap.get(writerId);
+            (result.file_ids || []).forEach(fileId => {
+                const fid = parseInt(fileId, 10);
+                if (isNaN(fid)) return;
+                if (!fileMap.has(fid)) fileMap.set(fid, new Set());
+                fileMap.get(fid).add(term);
+            });
+        });
+    });
+
+    return Array.from(writerMap.entries())
+        .map(([writerId, fileMap]) => ({
+            writer_id: writerId,
+            file_ids: Array.from(fileMap.keys()).sort((a, b) => a - b),
+            term_hits: fileMap,
+        }))
+        .filter(row => row.file_ids.length > 0)
+        .sort((a, b) => b.file_ids.length - a.file_ids.length || a.writer_id - b.writer_id);
+}
+
+function collectResponseFileMaps(responses) {
+    return responses.map(item => {
+        const writerMap = new Map();
+        ((item.data && item.data.results) || []).forEach(result => {
+            const writerId = parseInt(result && result.writer_id, 10);
+            if (isNaN(writerId)) return;
+            if (!writerMap.has(writerId)) writerMap.set(writerId, new Set());
+            const fileSet = writerMap.get(writerId);
+            (result.file_ids || []).forEach(fileId => {
+                const fid = parseInt(fileId, 10);
+                if (!isNaN(fid)) fileSet.add(fid);
+            });
+        });
+        return { term: item.term, writerMap: writerMap };
+    });
+}
+
+function combineBooleanSearchResponses(responses, mode) {
+    const normalizedMode = mode === 'OR' ? 'OR' : 'AND';
+    const termMaps = collectResponseFileMaps(responses);
+    if (!termMaps.length) return [];
+
+    const writerIds = new Set();
+    termMaps.forEach(termMap => {
+        termMap.writerMap.forEach((_, writerId) => writerIds.add(writerId));
+    });
+
+    const rows = [];
+    writerIds.forEach(writerId => {
+        let combined = null;
+        if (normalizedMode === 'AND') {
+            for (const termMap of termMaps) {
+                const files = termMap.writerMap.get(writerId) || new Set();
+                if (combined === null) {
+                    combined = new Set(files);
+                } else {
+                    combined = new Set(Array.from(combined).filter(fileId => files.has(fileId)));
+                }
+                if (combined.size === 0) break;
+            }
+        } else {
+            combined = new Set();
+            termMaps.forEach(termMap => {
+                const files = termMap.writerMap.get(writerId) || new Set();
+                files.forEach(fileId => combined.add(fileId));
+            });
+        }
+
+        const fileIds = Array.from(combined || []).sort((a, b) => a - b);
+        if (fileIds.length > 0) {
+            rows.push({ writer_id: writerId, file_ids: fileIds });
+        }
+    });
+
+    return rows.sort((a, b) => b.file_ids.length - a.file_ids.length || a.writer_id - b.writer_id);
+}
+
+async function handleBooleanSearch(event) {
+    event.preventDefault();
+
+    const textarea = getEl('boolean-keywords');
+    const modeInput = document.querySelector('input[name="boolean-mode"]:checked');
+    const mode = modeInput && modeInput.value === 'OR' ? 'OR' : 'AND';
+    const keywords = parseBooleanKeywords(textarea ? textarea.value : '');
+    const panel = getEl('boolean-search-results');
+    const progressEl = getEl('boolean-search-progress');
+    const meta = getEl('boolean-search-meta');
+    const termsEl = getEl('boolean-search-terms');
+    const detailEl = getEl('boolean-search-detail');
+
+    if (keywords.length < 2) {
+        showToast('请至少输入 2 个关键词用于联合检索', 'error');
+        return;
+    }
+
+    const writerIdsParam = getWriterIdsParamForSearch();
+    setSubmitLoading(event.target, true);
+    if (panel) panel.style.display = 'block';
+    if (progressEl) progressEl.textContent = `正在并发执行 ${keywords.length} 个独立关键词检索...`;
+    if (meta) meta.innerHTML = `<p class="search-meta-text">正在生成 ${keywords.length} 个独立搜索请求，并在客户端计算 ${mode}。</p>`;
+    if (termsEl) termsEl.innerHTML = keywords.map(term => `<span class="term-chip">${escapeHtml(term)}</span>`).join('');
+    if (detailEl) detailEl.innerHTML = '';
+
+    try {
+        const startedAt = performance.now();
+        const responses = await Promise.all(keywords.map(async keyword => ({
+            term: keyword,
+            data: await searchCurrentEpochKeyword(keyword, writerIdsParam)
+        })));
+        const elapsedMs = Number((performance.now() - startedAt).toFixed(2));
+        const combined = combineBooleanSearchResponses(responses, mode);
+        const total = getTotalFileCount(combined);
+        const perTermRows = responses.map(item => ({
+            term: item.term,
+            total: getTotalFileCount((item.data && item.data.results) || []),
+            writersHit: ((item.data && item.data.results) || []).filter(r => (r.file_ids || []).length > 0).length,
+            timeMs: item.data && typeof item.data.search_time_ms === 'number' ? item.data.search_time_ms : null,
+        }));
+
+        renderBooleanSearchSummary(keywords, mode, combined, perTermRows, elapsedMs);
+        const label = `${mode}(${keywords.join(', ')})`;
+        displaySearchResults(label, combined, elapsedMs, activeBatchEpoch);
+        const collapse = getEl('boolean-search-collapse');
+        if (collapse) collapse.open = true;
+        showToast(`${mode} 联合检索完成: 找到 ${total} 封匹配邮件`, 'success');
+    } catch (error) {
+        if (meta) {
+            meta.innerHTML = `<div class="result-message error"><strong>联合检索失败</strong><br>${escapeHtml(error.message || String(error))}</div>`;
+        }
+        if (detailEl) detailEl.innerHTML = '';
+        showToast('联合检索失败: ' + (error.message || String(error)), 'error');
+    } finally {
+        if (progressEl && progressEl.textContent.startsWith('正在并发')) progressEl.textContent = '';
+        setSubmitLoading(event.target, false);
+    }
+}
+
+function renderBooleanSearchSummary(keywords, mode, combinedRows, perTermRows, elapsedMs) {
+    const panel = getEl('boolean-search-results');
+    const progressEl = getEl('boolean-search-progress');
+    const meta = getEl('boolean-search-meta');
+    const detailEl = getEl('boolean-search-detail');
+    if (!panel || !meta || !detailEl) return;
+
+    const total = getTotalFileCount(combinedRows);
+    const writersHit = (combinedRows || []).filter(row => (row.file_ids || []).length > 0).length;
+    const modeText = mode === 'AND' ? '交集 AND' : '并集 OR';
+    meta.innerHTML = `
+        <p class="search-meta-text">
+            [Epoch ${activeBatchEpoch}] ${modeText} · ${keywords.length} 个独立关键词 Token ·
+            命中 <strong>${total}</strong> 封，覆盖 <strong>${writersHit}</strong> 位写者 · 前端总耗时 <strong>${elapsedMs}</strong> ms
+        </p>
+    `;
+
+    detailEl.innerHTML = `
+        <div class="boolean-term-table">
+            ${perTermRows.map(row => `
+                <div class="boolean-term-row">
+                    <div class="boolean-term-name">${escapeHtml(row.term)}</div>
+                    <div class="boolean-term-stat">命中 ${row.total} 封</div>
+                    <div class="boolean-term-stat">覆盖 ${row.writersHit} 位写者</div>
+                    <div class="boolean-term-stat">${typeof row.timeMs === 'number' ? `${row.timeMs} ms` : '-'}</div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+    if (progressEl) progressEl.textContent = total > 0 ? '联合结果已同步显示在上方“检索结果”区域。' : '联合检索完成，但没有文件满足当前条件。';
+    panel.style.display = 'block';
+}
+
+async function handleFuzzySearch(event) {
+    event.preventDefault();
+
+    const input = getEl('fuzzy-keyword');
+    const summary = getEl('fuzzy-search-summary');
+    const meta = getEl('fuzzy-search-meta');
+    const termsEl = getEl('fuzzy-search-terms');
+    const keyword = input ? input.value.trim() : '';
+    const terms = buildKeywordExpansions(keyword);
+    if (!terms.length) {
+        showToast('请输入要扩展检索的关键词', 'error');
+        return;
+    }
+
+    const writerIdsParam = getWriterIdsParamForSearch();
+    setSubmitLoading(event.target, true);
+    if (summary) summary.style.display = 'block';
+    if (meta) meta.innerHTML = `<p class="search-meta-text">正在执行 ${terms.length} 个扩展词检索，请稍候...</p>`;
+    if (termsEl) termsEl.innerHTML = terms.map(term => `<span class="term-chip">${escapeHtml(term)}</span>`).join('');
+
+    try {
+        const responses = await Promise.all(terms.map(async term => ({
+            term: term,
+            data: await searchCurrentEpochKeyword(term, writerIdsParam)
+        })));
+        const merged = mergeSearchResponses(responses);
+        const total = getTotalFileCount(merged);
+        const okCount = responses.filter(item => item.data && item.data.success).length;
+        const timeMs = responses
+            .map(item => item.data && typeof item.data.search_time_ms === 'number' ? item.data.search_time_ms : 0)
+            .reduce((sum, value) => sum + value, 0);
+        const label = `${keyword}（扩展: ${terms.join(', ')}）`;
+
+        if (meta) {
+            meta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 原词 "<strong>${escapeHtml(keyword)}</strong>" 扩展为 <strong>${terms.length}</strong> 个精确关键词；成功 <strong>${okCount}</strong> 个；合并后命中 <strong>${total}</strong> 封。</p>`;
+        }
+        displaySearchResults(label, merged, Number(timeMs.toFixed(2)), activeBatchEpoch);
+        const collapse = getEl('fuzzy-search-collapse');
+        if (collapse) collapse.open = true;
+        showToast(`扩展检索完成: 合并后找到 ${total} 封匹配邮件`, 'success');
+    } catch (error) {
+        if (meta) {
+            meta.innerHTML = `<div class="result-message error"><strong>扩展检索失败</strong><br>${escapeHtml(error.message || String(error))}</div>`;
+        }
+        showToast('扩展检索失败: ' + (error.message || String(error)), 'error');
+    } finally {
+        setSubmitLoading(event.target, false);
+    }
+}
+
+function getWriterIdsParamForSearch() {
+    const ids = getCurrentSelectedWriterIds();
+    return ids.length > 0 ? ids : null;
+}
+
+async function setAuditBatchEpochForAnalysis(epoch) {
+    const data = await apiFetchJson('/api/audit-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ epoch: epoch }),
+    });
+    if (!data || !data.success) {
+        throw new Error((data && data.error) ? data.error : `切换到 Epoch ${epoch} 失败`);
+    }
+    return parseInt(data.active_epoch, 10) || epoch;
+}
+
+async function restoreAuditBatchAfterAnalysis(epoch) {
+    try {
+        const restoredEpoch = await setAuditBatchEpochForAnalysis(epoch);
+        activeBatchEpoch = restoredEpoch;
+        const badge = getEl('active-batch-badge');
+        const input = getEl('batch-epoch-input');
+        if (badge) badge.textContent = `当前批次 Epoch: ${activeBatchEpoch}`;
+        if (input) input.value = String(activeBatchEpoch);
+    } catch (_) {
+        refreshAuditBatch();
+    }
+}
+
+async function searchKeywordAtEpoch(keyword, epoch, writerIdsParam) {
+    await setAuditBatchEpochForAnalysis(epoch);
+    const data = await apiFetchJson('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            keyword: keyword,
+            writer_ids: writerIdsParam
+        })
+    });
+    if (!data || !data.success) {
+        throw new Error((data && data.error) ? data.error : `Epoch ${epoch} 检索失败`);
+    }
+    return data;
+}
+
+function flattenResultMap(results) {
+    const map = new Map();
+    (results || []).forEach(item => {
+        const writerId = parseInt(item && item.writer_id, 10);
+        if (isNaN(writerId)) return;
+        (item.file_ids || []).forEach(fileId => {
+            const fid = parseInt(fileId, 10);
+            if (!isNaN(fid)) {
+                map.set(`${writerId}:${fid}`, { writerId: writerId, fileId: fid });
+            }
+        });
+    });
+    return map;
+}
+
+function groupFilesByWriter(files) {
+    const grouped = {};
+    (files || []).forEach(item => {
+        if (!grouped[item.writerId]) grouped[item.writerId] = [];
+        grouped[item.writerId].push(item.fileId);
+    });
+    return Object.keys(grouped)
+        .map(writerId => ({
+            writerId: parseInt(writerId, 10),
+            fileIds: grouped[writerId].sort((a, b) => a - b)
+        }))
+        .sort((a, b) => b.fileIds.length - a.fileIds.length || a.writerId - b.writerId);
+}
+
+function getWriterScopeText() {
+    const ids = getCurrentSelectedWriterIds();
+    if (!ids.length) return '全部已授权写者';
+    return ids.map(id => `员工 ${id + 1}`).join('、');
+}
+
+function setSubmitLoading(form, loading) {
+    if (!form) return;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (!submitBtn) return;
+    const btnText = submitBtn.querySelector('.btn-text');
+    const btnLoading = submitBtn.querySelector('.btn-loading');
+    submitBtn.disabled = loading;
+    if (btnText) btnText.style.display = loading ? 'none' : 'inline';
+    if (btnLoading) btnLoading.style.display = loading ? 'inline' : 'none';
+}
+
+async function handleEpochDiff(event) {
+    event.preventDefault();
+
+    const keyword = (getEl('epoch-diff-keyword') && getEl('epoch-diff-keyword').value || '').trim();
+    const oldEpoch = parseInt(getEl('epoch-diff-old') ? getEl('epoch-diff-old').value : '', 10);
+    const newEpoch = parseInt(getEl('epoch-diff-new') ? getEl('epoch-diff-new').value : '', 10);
+    const panel = getEl('epoch-diff-results');
+    const meta = getEl('epoch-diff-meta');
+    const content = getEl('epoch-diff-content');
+    const form = event.target;
+
+    if (!keyword) {
+        showToast('请输入要对比的关键词', 'error');
+        return;
+    }
+    if (isNaN(oldEpoch) || isNaN(newEpoch) || oldEpoch < 1 || newEpoch < 1) {
+        showToast('请输入合法的 Epoch（>=1）', 'error');
+        return;
+    }
+    if (newEpoch <= oldEpoch) {
+        showToast('对比 Epoch 必须大于基准 Epoch，才能计算新增文件集合', 'error');
+        return;
+    }
+
+    const originalEpoch = activeBatchEpoch;
+    const writerIdsParam = getWriterIdsParamForSearch();
+    setSubmitLoading(form, true);
+    if (panel) panel.style.display = 'block';
+    if (meta) {
+        meta.innerHTML = `<p class="search-meta-text">正在对比 Epoch ${oldEpoch} 与 Epoch ${newEpoch} 的关键词 "<strong>${escapeHtml(keyword)}</strong>"...</p>`;
+    }
+    if (content) content.innerHTML = '<div class="empty-state" style="padding: 16px;">正在执行两次检索并计算差集...</div>';
+
+    try {
+        const oldData = await searchKeywordAtEpoch(keyword, oldEpoch, writerIdsParam);
+        const newData = await searchKeywordAtEpoch(keyword, newEpoch, writerIdsParam);
+        renderEpochDiffResults(keyword, oldEpoch, newEpoch, oldData.results || [], newData.results || [], oldData.search_time_ms, newData.search_time_ms);
+        showToast('跨 Epoch 增量审计完成', 'success');
+    } catch (error) {
+        if (content) {
+            content.innerHTML = `<div class="result-message error"><strong>增量审计失败</strong><br>${escapeHtml(error.message || String(error))}</div>`;
+        }
+        showToast('增量审计失败: ' + (error.message || String(error)), 'error');
+    } finally {
+        await restoreAuditBatchAfterAnalysis(originalEpoch);
+        setSubmitLoading(form, false);
+    }
+}
+
+function renderEpochDiffResults(keyword, oldEpoch, newEpoch, oldResults, newResults, oldTimeMs, newTimeMs) {
+    const panel = getEl('epoch-diff-results');
+    const meta = getEl('epoch-diff-meta');
+    const content = getEl('epoch-diff-content');
+    if (!panel || !meta || !content) return;
+
+    const oldMap = flattenResultMap(oldResults);
+    const newMap = flattenResultMap(newResults);
+    const added = [];
+    const removed = [];
+
+    newMap.forEach((value, key) => {
+        if (!oldMap.has(key)) added.push(value);
+    });
+    oldMap.forEach((value, key) => {
+        if (!newMap.has(key)) removed.push(value);
+    });
+
+    const addedRows = groupFilesByWriter(added);
+    const timeText = [
+        typeof oldTimeMs === 'number' ? `Epoch ${oldEpoch}: ${oldTimeMs} ms` : null,
+        typeof newTimeMs === 'number' ? `Epoch ${newEpoch}: ${newTimeMs} ms` : null,
+    ].filter(Boolean).join('；');
+
+    meta.innerHTML = `
+        <p class="search-meta-text">
+            关键词 "<strong>${escapeHtml(keyword)}</strong>" · ${escapeHtml(getWriterScopeText())} ·
+            Epoch ${oldEpoch} 命中 <strong>${oldMap.size}</strong> 封，Epoch ${newEpoch} 命中 <strong>${newMap.size}</strong> 封，
+            新增 <strong>${added.length}</strong> 封，减少 <strong>${removed.length}</strong> 封${timeText ? ` · ${timeText}` : ''}
+        </p>
+    `;
+
+    if (addedRows.length === 0) {
+        content.innerHTML = `
+            <div class="empty-state" style="padding: 16px;">
+                未发现 Epoch ${newEpoch} 相对 Epoch ${oldEpoch} 的新增命中文件。
+            </div>
+        `;
+        panel.style.display = 'block';
+        return;
+    }
+
+    content.innerHTML = addedRows.map(row => `
+        <div class="epoch-diff-row">
+            <div class="epoch-diff-row-head">
+                <strong>员工 ${row.writerId}</strong>
+                <span class="epoch-new-count">新增 ${row.fileIds.length} 封</span>
+            </div>
+            <div class="file-ids epoch-new-files">
+                ${row.fileIds.map(fileId =>
+                    `<span class="file-id-badge epoch-new-file" onclick="viewDocument(${row.writerId - 1}, ${fileId})" title="查看加密存储信息">${fileId}</span>`
+                ).join('')}
+            </div>
+        </div>
+    `).join('');
+    panel.style.display = 'block';
+}
+
+async function handleEpochTrend(event) {
+    event.preventDefault();
+
+    const keyword = (getEl('epoch-trend-keyword') && getEl('epoch-trend-keyword').value || '').trim();
+    const startEpoch = parseInt(getEl('epoch-trend-start') ? getEl('epoch-trend-start').value : '', 10);
+    const endEpoch = parseInt(getEl('epoch-trend-end') ? getEl('epoch-trend-end').value : '', 10);
+    const panel = getEl('epoch-trend-results');
+    const meta = getEl('epoch-trend-meta');
+    const table = getEl('epoch-trend-table');
+    const form = event.target;
+
+    if (!keyword) {
+        showToast('请输入要追踪的关键词', 'error');
+        return;
+    }
+    if (isNaN(startEpoch) || isNaN(endEpoch) || startEpoch < 1 || endEpoch < 1 || startEpoch > endEpoch) {
+        showToast('请输入合法的 Epoch 范围', 'error');
+        return;
+    }
+    if (endEpoch - startEpoch + 1 > 30) {
+        showToast('一次最多分析 30 个 Epoch', 'error');
+        return;
+    }
+
+    const originalEpoch = activeBatchEpoch;
+    const writerIdsParam = getWriterIdsParamForSearch();
+    const rows = [];
+    setSubmitLoading(form, true);
+    if (panel) panel.style.display = 'block';
+    if (table) table.innerHTML = '<div class="empty-state" style="padding: 16px;">正在逐批次检索，请稍候...</div>';
+
+    try {
+        for (let epoch = startEpoch; epoch <= endEpoch; epoch += 1) {
+            if (meta) {
+                meta.innerHTML = `<p class="search-meta-text">正在分析关键词 "<strong>${escapeHtml(keyword)}</strong>"：Epoch ${epoch} / ${endEpoch}</p>`;
+            }
+            const data = await searchKeywordAtEpoch(keyword, epoch, writerIdsParam);
+            rows.push({
+                epoch: epoch,
+                total: getTotalFileCount(data.results || []),
+                writersHit: (data.results || []).filter(r => (r.file_ids || []).length > 0).length,
+                timeMs: data.search_time_ms
+            });
+        }
+        renderEpochTrendResults(keyword, startEpoch, endEpoch, rows);
+        showToast('Epoch 趋势追踪完成', 'success');
+    } catch (error) {
+        if (table) {
+            table.innerHTML = `<div class="result-message error"><strong>趋势追踪失败</strong><br>${escapeHtml(error.message || String(error))}</div>`;
+        }
+        showToast('趋势追踪失败: ' + (error.message || String(error)), 'error');
+    } finally {
+        await restoreAuditBatchAfterAnalysis(originalEpoch);
+        setSubmitLoading(form, false);
+    }
+}
+
+function renderEpochTrendResults(keyword, startEpoch, endEpoch, rows) {
+    const meta = getEl('epoch-trend-meta');
+    const table = getEl('epoch-trend-table');
+    const panel = getEl('epoch-trend-results');
+    if (!meta || !table || !panel) return;
+
+    const maxRow = rows.reduce((best, row) => row.total > best.total ? row : best, { epoch: '-', total: 0 });
+    meta.innerHTML = `
+        <p class="search-meta-text">
+            关键词 "<strong>${escapeHtml(keyword)}</strong>" · ${escapeHtml(getWriterScopeText())} ·
+            Epoch ${startEpoch} 至 ${endEpoch} · 峰值 Epoch <strong>${maxRow.epoch}</strong>，命中 <strong>${maxRow.total}</strong> 封
+        </p>
+    `;
+
+    renderEpochTrendChart(rows, keyword);
+    table.innerHTML = rows.map((row, idx) => {
+        const prev = idx > 0 ? rows[idx - 1].total : row.total;
+        const delta = row.total - prev;
+        const deltaText = idx === 0 ? '-' : (delta >= 0 ? `+${delta}` : `${delta}`);
+        const deltaClass = delta > 0 ? 'up' : (delta < 0 ? 'down' : 'flat');
+        return `
+            <div class="epoch-trend-row">
+                <div class="epoch-trend-cell strong">Epoch ${row.epoch}</div>
+                <div class="epoch-trend-cell">命中 ${row.total} 封</div>
+                <div class="epoch-trend-cell">覆盖 ${row.writersHit} 位写者</div>
+                <div class="epoch-trend-cell epoch-delta ${deltaClass}">较前批次 ${deltaText}</div>
+            </div>
+        `;
+    }).join('');
+    panel.style.display = 'block';
+}
+
+function renderEpochTrendChart(rows, keyword) {
+    const canvas = getEl('epoch-trend-chart');
+    if (!canvas) return;
+
+    if (typeof Chart !== 'undefined') {
+        if (epochTrendChartInstance && typeof epochTrendChartInstance.destroy === 'function') {
+            epochTrendChartInstance.destroy();
+        }
+        epochTrendChartInstance = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: rows.map(row => `Epoch ${row.epoch}`),
+                datasets: [{
+                    label: keyword,
+                    data: rows.map(row => row.total),
+                    borderColor: '#2563eb',
+                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                    tension: 0.25,
+                    fill: true,
+                    pointRadius: 4,
+                    pointHoverRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    y: { beginAtZero: true, ticks: { precision: 0 } }
+                }
+            }
+        });
+        return;
+    }
+
+    drawEpochTrendCanvas(canvas, rows);
+}
+
+function drawEpochTrendCanvas(canvas, rows) {
+    const parentWidth = canvas.parentElement ? canvas.parentElement.clientWidth : 800;
+    const width = Math.max(parentWidth, 320);
+    const height = 260;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = width * ratio;
+    canvas.height = height * ratio;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const pad = { left: 46, right: 18, top: 18, bottom: 36 };
+    const plotW = width - pad.left - pad.right;
+    const plotH = height - pad.top - pad.bottom;
+    const maxValue = Math.max(1, ...rows.map(row => row.total));
+    const stepX = rows.length > 1 ? plotW / (rows.length - 1) : 0;
+
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#64748b';
+    for (let i = 0; i <= 4; i += 1) {
+        const y = pad.top + plotH - (plotH * i / 4);
+        const value = Math.round(maxValue * i / 4);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
+        ctx.fillText(String(value), 8, y + 4);
+    }
+
+    const points = rows.map((row, idx) => ({
+        x: pad.left + (rows.length > 1 ? stepX * idx : plotW / 2),
+        y: pad.top + plotH - (row.total / maxValue) * plotH,
+        row: row
+    }));
+
+    ctx.strokeStyle = '#2563eb';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    points.forEach((point, idx) => {
+        if (idx === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+    });
+    ctx.stroke();
+
+    points.forEach(point => {
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#334155';
+        ctx.fillText(String(point.row.total), point.x - 6, point.y - 10);
+        ctx.fillStyle = '#64748b';
+        ctx.fillText(String(point.row.epoch), point.x - 8, height - 12);
+    });
+}
+
 async function handleSearch(event) {
     event.preventDefault();
 
@@ -435,9 +1164,18 @@ async function handleTopNKeywords(event) {
             if (data && data.success) {
                 const total = getTotalFileCount(data.results);
                 const writerCounts = {};
+                const fileHits = [];
                 (data.results || []).forEach(item => {
                     const count = item && item.file_ids ? item.file_ids.length : 0;
+                    const writerId = parseInt(item && item.writer_id, 10);
                     if (count > 0) writerCounts[item.writer_id] = count;
+                    (item.file_ids || []).forEach(fileId => {
+                        if (fileHits.length >= GRAPH_FILE_HIT_LIMIT_PER_KEYWORD) return;
+                        const fid = parseInt(fileId, 10);
+                        if (!isNaN(writerId) && !isNaN(fid)) {
+                            fileHits.push({ keyword: keyword, writerId: writerId, fileId: fid });
+                        }
+                    });
                 });
                 return {
                     keyword: keyword,
@@ -445,6 +1183,7 @@ async function handleTopNKeywords(event) {
                     writersHit: (data.results || []).filter(r => (r.file_ids || []).length > 0).length,
                     timeMs: data.search_time_ms,
                     writerCounts: writerCounts,
+                    fileHits: fileHits,
                     ok: true
                 };
             }
@@ -454,6 +1193,7 @@ async function handleTopNKeywords(event) {
                 writersHit: 0,
                 timeMs: null,
                 writerCounts: {},
+                fileHits: [],
                 ok: false,
                 error: (data && data.error) ? data.error : '检索失败'
             };
@@ -469,6 +1209,7 @@ async function handleTopNKeywords(event) {
         currentTopNRows = topList;
         renderTopNResults(keywords.length, topN, topList);
         renderRiskProfileFromTopN(topList);
+        renderCollusionGraph(topList);
         showToast(`Top-N 分析完成: 共分析 ${keywords.length} 个关键词`, 'success');
     } catch (error) {
         showToast('Top-N 分析失败: ' + (error.message || String(error)), 'error');
@@ -495,6 +1236,30 @@ function parseBatchKeywords(rawText) {
         }
     });
     return uniq.slice(0, 100);
+}
+
+function parseBooleanKeywords(rawText) {
+    const text = String(rawText || '').trim();
+    if (!text) return [];
+
+    const hasStrongDelimiter = /[,，;；\n\r]/.test(text);
+    const rawParts = hasStrongDelimiter
+        ? text.split(/[,，;；\n\r]+/)
+        : text.split(/\s+/);
+    const uniq = [];
+    const seen = new Set();
+
+    rawParts
+        .map(s => s.trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').toLowerCase())
+        .filter(Boolean)
+        .forEach(keyword => {
+            if (!seen.has(keyword)) {
+                seen.add(keyword);
+                uniq.push(keyword);
+            }
+        });
+
+    return uniq.slice(0, 20);
 }
 
 function renderTopNResults(totalKeywords, topN, rows) {
@@ -526,9 +1291,12 @@ function renderTopNResults(totalKeywords, topN, rows) {
 
 function hideTopNResults() {
     const panel = getEl('topn-results');
+    const progressEl = getEl('topn-progress');
     if (panel) panel.style.display = 'none';
+    if (progressEl) progressEl.textContent = '';
     currentTopNRows = [];
     renderRiskProfileFromTopN([]);
+    renderCollusionGraph([]);
 }
 
 function renderRiskProfileFromTopN(rows) {
@@ -576,6 +1344,125 @@ function renderRiskProfileFromTopN(rows) {
     if (collapse) collapse.open = true;
 }
 
+function collectGraphEdgesFromTopN(rows) {
+    const edgeMap = new Map();
+    (rows || []).forEach((row, rankIdx) => {
+        const hits = Array.isArray(row.fileHits) ? row.fileHits : [];
+        hits.forEach(hit => {
+            const writerId = parseInt(hit.writerId, 10);
+            const fileId = parseInt(hit.fileId, 10);
+            if (isNaN(writerId) || isNaN(fileId)) return;
+            const key = `${writerId}:${fileId}`;
+            if (!edgeMap.has(key)) {
+                edgeMap.set(key, {
+                    writerId: writerId,
+                    fileId: fileId,
+                    keywords: new Set(),
+                    rankScore: 0,
+                });
+            }
+            const edge = edgeMap.get(key);
+            edge.keywords.add(hit.keyword || row.keyword);
+            edge.rankScore += Math.max(1, (rows.length - rankIdx));
+        });
+    });
+
+    return Array.from(edgeMap.values())
+        .map(edge => ({
+            writerId: edge.writerId,
+            fileId: edge.fileId,
+            keywords: Array.from(edge.keywords).sort(),
+            rankScore: edge.rankScore,
+        }))
+        .sort((a, b) => b.rankScore - a.rankScore || a.writerId - b.writerId || a.fileId - b.fileId);
+}
+
+function renderCollusionGraph(rows) {
+    const panel = getEl('collusion-graph-panel');
+    const meta = getEl('collusion-graph-meta');
+    const legend = getEl('collusion-graph-legend');
+    const collapse = getEl('collusion-graph-collapse');
+    if (!panel || !meta) return;
+
+    const sourceRows = Array.isArray(rows) ? rows : currentTopNRows;
+    const allEdges = collectGraphEdgesFromTopN(sourceRows);
+    if (!allEdges.length) {
+        panel.innerHTML = '<div class="empty-state" style="padding: 16px;">暂无图谱数据。请先执行一次多关键词 Top-N 或审计词包扫描。</div>';
+        meta.textContent = '先执行一次多关键词 Top-N 或一键扫描词包后生成图谱。';
+        if (legend) legend.style.display = 'none';
+        return;
+    }
+
+    const fileDegree = {};
+    allEdges.forEach(edge => {
+        fileDegree[edge.fileId] = (fileDegree[edge.fileId] || 0) + 1;
+    });
+    const selectedFiles = Object.keys(fileDegree)
+        .map(fileId => ({ fileId: parseInt(fileId, 10), degree: fileDegree[fileId] }))
+        .sort((a, b) => b.degree - a.degree || a.fileId - b.fileId)
+        .slice(0, 28)
+        .map(item => item.fileId);
+    const selectedFileSet = new Set(selectedFiles);
+    const edges = allEdges
+        .filter(edge => selectedFileSet.has(edge.fileId))
+        .slice(0, 90);
+
+    const writers = Array.from(new Set(edges.map(edge => edge.writerId))).sort((a, b) => a - b);
+    const files = Array.from(new Set(edges.map(edge => edge.fileId))).sort((a, b) => {
+        const d = (fileDegree[b] || 0) - (fileDegree[a] || 0);
+        return d !== 0 ? d : a - b;
+    });
+    const height = Math.max(380, Math.min(1320, Math.max(writers.length, files.length) * 42 + 90));
+    const writerY = {};
+    const fileY = {};
+    writers.forEach((writerId, idx) => {
+        writerY[writerId] = 60 + idx * ((height - 120) / Math.max(1, writers.length - 1));
+    });
+    files.forEach((fileId, idx) => {
+        fileY[fileId] = 60 + idx * ((height - 120) / Math.max(1, files.length - 1));
+    });
+
+    const svgEdges = edges.map(edge => {
+        const title = `员工 ${edge.writerId} -> 文件 ${edge.fileId}: ${edge.keywords.join(', ')}`;
+        return `
+            <line class="graph-edge-line" x1="180" y1="${writerY[edge.writerId].toFixed(2)}" x2="790" y2="${fileY[edge.fileId].toFixed(2)}">
+                <title>${escapeHtml(title)}</title>
+            </line>
+        `;
+    }).join('');
+
+    const writerNodes = writers.map(writerId => `
+        <g class="graph-node writer-node" transform="translate(145 ${writerY[writerId].toFixed(2)})">
+            <circle r="17"></circle>
+            <text x="-54" y="5">员工 ${writerId}</text>
+        </g>
+    `).join('');
+
+    const fileNodes = files.map(fileId => {
+        const degree = fileDegree[fileId] || 0;
+        return `
+            <g class="graph-node file-node" transform="translate(825 ${fileY[fileId].toFixed(2)})">
+                <rect x="-22" y="-13" width="44" height="26" rx="7"></rect>
+                <text x="32" y="5">文件 ${fileId} · ${degree} 边</text>
+            </g>
+        `;
+    }).join('');
+
+    panel.innerHTML = `
+        <svg class="collusion-graph-svg" viewBox="0 0 1000 ${height}" role="img" aria-label="跨写者关联图谱">
+            <text class="graph-axis-label" x="95" y="26">写者</text>
+            <text class="graph-axis-label" x="790" y="26">高危文件</text>
+            ${svgEdges}
+            ${writerNodes}
+            ${fileNodes}
+        </svg>
+    `;
+    const truncatedText = allEdges.length > edges.length ? `，已抽样展示 ${edges.length}/${allEdges.length} 条边` : '';
+    meta.textContent = `图谱包含 ${writers.length} 位写者、${files.length} 个高危文件、${edges.length} 条命中关系${truncatedText}。`;
+    if (legend) legend.style.display = 'flex';
+    if (collapse && allEdges.length > 0) collapse.open = true;
+}
+
 function getStoredCases() {
     try {
         const raw = localStorage.getItem(CASE_STORAGE_KEY);
@@ -589,6 +1476,12 @@ function getStoredCases() {
 
 function setStoredCases(cases) {
     localStorage.setItem(CASE_STORAGE_KEY, JSON.stringify(cases));
+}
+
+function setCaseApplyHint(message) {
+    const hint = getEl('case-apply-hint');
+    if (!hint) return;
+    hint.textContent = message || '';
 }
 
 function getCurrentSelectedWriterIds() {
@@ -616,7 +1509,13 @@ function saveCurrentCase() {
         topn: {
             keywords_text: topnKeywords,
             limit: isNaN(topnLimit) ? 10 : topnLimit,
-            rows: (currentTopNRows || []).map(r => ({ keyword: r.keyword, total: r.total, writersHit: r.writersHit }))
+            rows: (currentTopNRows || []).map(r => ({
+                keyword: r.keyword,
+                total: r.total,
+                writersHit: r.writersHit,
+                writerCounts: r.writerCounts || {},
+                fileHits: Array.isArray(r.fileHits) ? r.fileHits.slice(0, GRAPH_FILE_HIT_LIMIT_PER_KEYWORD) : []
+            }))
         },
         risk_profile: (currentRiskRows || []).map(r => ({ writerId: r.writerId, score: r.score, hits: r.hits }))
     };
@@ -625,7 +1524,71 @@ function saveCurrentCase() {
     cases.unshift(newCase);
     setStoredCases(cases.slice(0, 50));
     renderCaseList();
+    setCaseApplyHint(`已保存任务单 "${caseName}"。`);
     showToast('任务单已保存', 'success');
+}
+
+function restoreTopNCaseSnapshot(target) {
+    const topn = target && target.topn ? target.topn : {};
+    const rows = Array.isArray(topn.rows)
+        ? topn.rows.map(row => ({
+            keyword: row && row.keyword ? String(row.keyword) : '',
+            total: parseInt(row && row.total, 10) || 0,
+            writersHit: parseInt(row && row.writersHit, 10) || 0,
+            writerCounts: row && row.writerCounts && typeof row.writerCounts === 'object' ? row.writerCounts : {},
+            fileHits: Array.isArray(row && row.fileHits) ? row.fileHits : [],
+            ok: true
+        })).filter(row => row.keyword)
+        : [];
+
+    if (!rows.length) {
+        hideTopNResults();
+        return false;
+    }
+
+    currentTopNRows = rows;
+    const totalKeywords = parseBatchKeywords(topn.keywords_text || '').length || rows.length;
+    let topNLimit = parseInt(topn.limit, 10);
+    if (isNaN(topNLimit) || topNLimit < 1) topNLimit = rows.length;
+    renderTopNResults(totalKeywords, topNLimit, rows);
+
+    const progressEl = getEl('topn-progress');
+    if (progressEl) {
+        progressEl.textContent = '已恢复任务单中的 Top-N 快照；如需当前最新结果，请重新执行分析。';
+    }
+    return true;
+}
+
+function renderRiskProfileSnapshot(rows) {
+    const content = getEl('risk-profile-content');
+    const collapse = getEl('risk-profile-collapse');
+    if (!content) return false;
+
+    const normalizedRows = Array.isArray(rows)
+        ? rows.map(row => ({
+            writerId: parseInt(row && row.writerId, 10) || 0,
+            score: parseInt(row && row.score, 10) || 0,
+            hits: parseInt(row && row.hits, 10) || 0,
+        })).filter(row => row.writerId > 0)
+        : [];
+
+    currentRiskRows = normalizedRows;
+
+    if (normalizedRows.length === 0) {
+        content.innerHTML = '<div class="empty-state" style="padding: 16px;">当前任务单没有可恢复的风险画像快照。</div>';
+        return false;
+    }
+
+    content.innerHTML = normalizedRows.map((row, idx) => `
+        <div class="risk-row">
+            <div class="risk-writer">#${idx + 1} 员工 ${row.writerId}</div>
+            <div class="risk-metric">风险分值 ${row.score}</div>
+            <div class="risk-metric">累计命中 ${row.hits} 封</div>
+        </div>
+    `).join('');
+
+    if (collapse) collapse.open = true;
+    return true;
 }
 
 function applyCase(caseId) {
@@ -636,13 +1599,16 @@ function applyCase(caseId) {
         return;
     }
     const caseEpoch = parseInt(target.epoch || 1, 10);
-    if (caseEpoch !== activeBatchEpoch) {
-        showToast(`该任务单来自 Epoch ${caseEpoch}，当前为 Epoch ${activeBatchEpoch}。为符合前向隐私，仅回填条件，需要在当前批次重新检索。`, 'info');
-    }
+    const crossEpoch = caseEpoch !== activeBatchEpoch;
+    const keywordEl = getEl('keyword');
+    const topnKeywordsEl = getEl('topn-keywords');
+    const topnLimitEl = getEl('topn-limit');
+    const caseNameInput = getEl('case-name');
 
-    if (getEl('keyword')) getEl('keyword').value = target.search && target.search.keyword ? target.search.keyword : '';
-    if (getEl('topn-keywords')) getEl('topn-keywords').value = target.topn && target.topn.keywords_text ? target.topn.keywords_text : '';
-    if (getEl('topn-limit')) getEl('topn-limit').value = (target.topn && target.topn.limit) ? target.topn.limit : 10;
+    if (caseNameInput) caseNameInput.value = target.name || '';
+    if (keywordEl) keywordEl.value = target.search && target.search.keyword ? target.search.keyword : '';
+    if (topnKeywordsEl) topnKeywordsEl.value = target.topn && target.topn.keywords_text ? target.topn.keywords_text : '';
+    if (topnLimitEl) topnLimitEl.value = (target.topn && target.topn.limit) ? target.topn.limit : 10;
     updateTopNKeywordCount();
 
     const writerSelect = getEl('writer-select');
@@ -652,8 +1618,45 @@ function applyCase(caseId) {
             option.selected = selectedSet.has(parseInt(option.value, 10));
         });
     }
+    updateWriterSelectionCount();
 
-    showToast(`已应用任务单: ${target.name}`, 'success');
+    hideSearchResults();
+
+    const caseCollapse = getEl('case-collapse');
+    if (caseCollapse) caseCollapse.open = true;
+
+    const topnCollapse = getEl('topn-collapse');
+    if (topnCollapse && topnKeywordsEl && topnKeywordsEl.value.trim()) topnCollapse.open = true;
+
+    let restoredSnapshot = false;
+    if (crossEpoch) {
+        hideTopNResults();
+        setCaseApplyHint(`任务单 "${target.name}" 来自 Epoch ${caseEpoch}，当前批次是 Epoch ${activeBatchEpoch}。已恢复检索条件，但不会恢复旧批次分析结果，请在当前批次重新检索与分析。`);
+        showToast(`任务单来自 Epoch ${caseEpoch}，当前是 Epoch ${activeBatchEpoch}。仅恢复条件，请重新检索。`, 'info');
+    } else {
+        restoredSnapshot = restoreTopNCaseSnapshot(target);
+        if (!restoredSnapshot) {
+            hideTopNResults();
+        }
+        renderRiskProfileSnapshot(target.risk_profile || []);
+        renderCollusionGraph(currentTopNRows);
+        setCaseApplyHint(
+            restoredSnapshot
+                ? `已应用任务单 "${target.name}"，并恢复同批次分析快照。`
+                : `已应用任务单 "${target.name}"，并恢复检索条件。`
+        );
+        showToast(
+            restoredSnapshot
+                ? `已应用任务单: ${target.name}（已恢复快照）`
+                : `已应用任务单: ${target.name}`,
+            'success'
+        );
+    }
+
+    if (keywordEl) {
+        keywordEl.focus();
+        keywordEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 }
 
 function deleteCase(caseId) {
@@ -673,6 +1676,7 @@ function renderCaseList() {
     const cases = getStoredCases();
     if (countEl) countEl.textContent = `当前已保存 ${cases.length} 个任务单（本地浏览器）`;
     if (cases.length === 0) {
+        setCaseApplyHint('');
         container.innerHTML = '<div class="empty-state" style="padding: 12px;">暂无任务单，先保存一次当前分析。</div>';
         return;
     }
@@ -710,6 +1714,12 @@ function exportCasesJson() {
     showToast('任务单 JSON 已导出', 'success');
 }
 
+function getSearchTimeLabel(keyword) {
+    return /^(AND|OR)\(/.test(String(keyword || ''))
+        ? '前端联合检索总耗时'
+        : '亚线性检索耗时';
+}
+
 function displaySearchResults(keyword, results, searchTimeMs, epochUsed) {
     const resultsContainer = getEl('search-results');
     const resultsContent = getEl('results-content');
@@ -729,7 +1739,8 @@ function displaySearchResults(keyword, results, searchTimeMs, epochUsed) {
     }
 
     if (typeof searchTimeMs === 'number') {
-        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(keyword)}</strong>" · 亚线性检索耗时 <strong>${searchTimeMs}</strong> ms</p>`;
+        const timeLabel = getSearchTimeLabel(keyword);
+        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(keyword)}</strong>" · ${timeLabel} <strong>${searchTimeMs}</strong> ms</p>`;
         searchMeta.style.display = 'block';
     } else {
         searchMeta.innerHTML = '';
@@ -803,7 +1814,8 @@ function renderSearchResultsWithFilter() {
 
     if (typeof currentSearchTimeMs === 'number') {
         const filterText = currentWriterFilter == null ? '' : ` · 当前筛选: 员工 ${currentWriterFilter}`;
-        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · 亚线性检索耗时 <strong>${currentSearchTimeMs}</strong> ms${filterText}</p>`;
+        const timeLabel = getSearchTimeLabel(currentSearchKeyword);
+        searchMeta.innerHTML = `<p class="search-meta-text">[Epoch ${activeBatchEpoch}] 关键字 "<strong>${escapeHtml(currentSearchKeyword)}</strong>" · ${timeLabel} <strong>${currentSearchTimeMs}</strong> ms${filterText}</p>`;
         searchMeta.style.display = 'block';
     }
 
@@ -825,10 +1837,10 @@ function renderSearchResultsWithFilter() {
             html += `
                 <div class="result-item">
                     <h4>员工 ${writerId}</h4>
-                    <p>匹配 ${result.file_ids.length} 封邮件，点击邮件ID查看明文内容:</p>
+                    <p>匹配 ${result.file_ids.length} 封邮件，读者端仅展示文件ID与加密存储信息:</p>
                     <div class="file-ids">
                         ${visibleIds.map(id =>
-                            `<span class="file-id-badge" onclick="viewDocument(${writerId - 1}, ${id})" title="点击查看邮件内容">${id}</span>`
+                            `<span class="file-id-badge" onclick="viewDocument(${writerId - 1}, ${id})" title="查看加密存储信息">${id}</span>`
                         ).join('')}
                     </div>
                     ${allIds.length > FILE_ID_PREVIEW_LIMIT ? `
@@ -914,13 +1926,13 @@ async function viewDocument(writerId, fileId) {
     modal.innerHTML = `
         <div class="document-modal-content">
             <div class="document-modal-header">
-                <h3>邮件内容 - 员工 ${writerId + 1}, 文件ID: ${fileId}</h3>
+                <h3>加密存储信息 - 员工 ${writerId + 1}, 文件ID: ${fileId}</h3>
                 <button class="document-modal-close" onclick="closeDocumentModal()">&times;</button>
             </div>
             <div class="document-modal-body">
                 <div id="document-loading" style="text-align: center; padding: 20px;">
                     <div class="loading"></div>
-                    <p>正在获取邮件内容...</p>
+                    <p>正在获取加密存储信息...</p>
                 </div>
                 <div id="document-content" style="display: none;"></div>
                 <div id="document-error" style="display: none;"></div>
@@ -947,22 +1959,20 @@ async function viewDocument(writerId, fileId) {
                 ? escapeHtml(data.message)
                 : escapeHtml(data.content ? data.content.substring(0, previewLen) : '');
             if (!data.placeholder && data.content && data.content.length > previewLen) {
-                encryptedPreview += '\n\n... (密文已截断，点击「解密」可查看全文原文)';
+                encryptedPreview += '\n\n... (密文预览已截断，读者端不提供明文解密)';
             }
             contentDiv.innerHTML = `
                 <div class="document-info">
                     <p><strong>状态:</strong> <span class="encrypted-badge">已加密</span></p>
+                    <p><strong>访问边界:</strong> 读者端仅允许查看文件ID和密文状态，不提供明文解密。</p>
                     ${data.size != null ? `<p><strong>密文大小:</strong> ${data.size} 字节</p>` : ''}
                 </div>
                 <pre class="document-text encrypted-preview" style="max-height: 320px; overflow: auto; background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; font-size: 13px;">${encryptedPreview}</pre>
-                <div style="margin-top: 12px;">
-                    <button type="button" class="btn btn-primary" id="btn-decrypt-doc" onclick="requestDecryptDocument(${writerId}, ${fileId})">解密</button>
-                </div>
             `;
         } else if (data.success && !data.encrypted) {
             const contentDiv = getEl('document-content');
             contentDiv.style.display = 'block';
-            contentDiv.innerHTML = buildDecryptedContentHtml(data, writerId, fileId);
+            contentDiv.innerHTML = '<div class="result-message error"><strong>已阻止明文展示</strong><br>读者端不允许查看邮件原文。</div>';
         } else {
             showDocumentError(data);
         }
@@ -975,64 +1985,6 @@ async function viewDocument(writerId, fileId) {
             </div>
         `;
     }
-}
-
-async function requestDecryptDocument(writerId, fileId) {
-    const btn = getEl('btn-decrypt-doc');
-    const contentDiv = getEl('document-content');
-    if (btn) {
-        btn.disabled = true;
-        btn.textContent = '解密中...';
-    }
-    try {
-        const data = await apiFetchJson('/api/document', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ writer_id: writerId, file_id: fileId, decrypt: true })
-        });
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = '解密';
-        }
-        if (data.success && contentDiv) {
-            contentDiv.innerHTML = buildDecryptedContentHtml(data, writerId, fileId);
-        } else if (contentDiv) {
-            contentDiv.innerHTML = `<div class="result-message error"><strong>解密失败</strong><br>${escapeHtml(data.error || '未知错误')}</div>`;
-        }
-    } catch (error) {
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = '解密';
-        }
-        if (contentDiv) {
-            contentDiv.innerHTML = `<div class="result-message error"><strong>错误</strong><br>请求失败: ${escapeHtml(error.message || String(error))}</div>`;
-        }
-    }
-}
-
-function buildDecryptedContentHtml(data, writerId, fileId) {
-    const enc = data.encoding || 'utf-8';
-    const size = data.size != null ? data.size : (data.content ? data.content.length : 0);
-    if (data.encoding === 'base64') {
-        const snippet = data.content ? data.content.substring(0, 1000) : '';
-        return `
-            <div class="document-info">
-                <p><strong>状态:</strong> <span class="decrypted-badge">已解密</span></p>
-                <p><strong>文件大小:</strong> ${size} 字节</p>
-                <p><strong>类型:</strong> 二进制文件</p>
-                <button class="btn btn-primary" onclick="downloadDecryptedDocument(${writerId}, ${fileId})">下载解密后的文件</button>
-            </div>
-            <pre class="document-text" style="max-height: 400px; overflow: auto; background: #f5f5f5; padding: 15px; border-radius: 6px;">${escapeHtml(snippet)}${(data.content && data.content.length > 1000) ? '\n\n... (内容已截断，请下载查看完整文件)' : ''}</pre>
-        `;
-    }
-    return `
-        <div class="document-info">
-            <p><strong>状态:</strong> <span class="decrypted-badge">已解密</span></p>
-            <p><strong>文件大小:</strong> ${size} 字节</p>
-            <p><strong>编码:</strong> ${enc}</p>
-        </div>
-        <pre class="document-text" style="max-height: 500px; overflow: auto; background: #f5f5f5; padding: 15px; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(data.content || '')}</pre>
-    `;
 }
 
 function showDocumentError(data) {
@@ -1066,40 +2018,6 @@ function escapeHtml(text) {
     return String(text || '').replace(/[&<>"']/g, function(m) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
     });
-}
-
-async function downloadDecryptedDocument(writerId, fileId) {
-    try {
-        const data = await apiFetchJson('/api/document', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ writer_id: writerId, file_id: fileId })
-        });
-
-        if (data.success) {
-            let blob;
-            if (data.encoding === 'base64') {
-                const binaryString = atob(data.content);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-                blob = new Blob([bytes], { type: 'application/octet-stream' });
-            } else {
-                blob = new Blob([data.content], { type: 'text/plain;charset=utf-8' });
-            }
-
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `mail_employee_${writerId + 1}_file_${fileId}.txt`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            showToast('文档下载成功', 'success');
-        }
-    } catch (error) {
-        showToast('下载失败: ' + (error.message || String(error)), 'error');
-    }
 }
 
 async function updateClientStatus() {
