@@ -1,7 +1,7 @@
 """
 多写作者邮件合规审计系统 - Web 后端
 
-角色：读者（审计员）通过本 API 进行跨写作者关键字搜索，写作者为安然员工，
+角色：读者（审计员）通过本 API 进行跨写作者关键字搜索，写作者为安然员工，管理员负责推进审计批次 Epoch。
 云服务器仅存储加密索引、执行搜索，无法获知关键字明文。
 """
 
@@ -13,6 +13,13 @@ import time
 import base64
 import json
 import subprocess
+import shutil
+import threading
+import uuid
+from datetime import datetime
+import tempfile
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from email.parser import Parser
 from email.utils import getaddresses
 from pathlib import Path
@@ -22,7 +29,7 @@ from functools import wraps
 sys.path.insert(0, os.path.dirname(__file__))
 
 try:
-    import zmq  # 用于直接向Hermes server查询writer数量
+    import zmq  
 except Exception:
     zmq = None
 
@@ -86,19 +93,47 @@ CLIENT_CONFIG = {
     'num_writers': HERMES_NUM_WRITERS,
     'epoch': HERMES_EPOCH,
 }
+#  全局审计 Epoch 
+GLOBAL_EPOCH_FILE = Path(__file__).parent / "global_epoch.txt"
+def get_global_epoch() -> int:
+    if GLOBAL_EPOCH_FILE.exists():
+        try:
+            return int(GLOBAL_EPOCH_FILE.read_text().strip())
+        except:
+            pass
+    return HERMES_EPOCH
+def set_global_epoch(epoch: int):
+    GLOBAL_EPOCH_FILE.write_text(str(epoch))
+if not GLOBAL_EPOCH_FILE.exists():
+    set_global_epoch(HERMES_EPOCH)
 hermes_client = HermesClient(**CLIENT_CONFIG)
-# 使 C++ 客户端的 load_update_state 与 Flask 写入的 database 目录一致，避免增量添加时用错 count 覆盖链导致原有关键字-文件对消失
 if getattr(hermes_client, 'set_database_dir', None):
     hermes_client.set_database_dir(str(DATABASE_DIR.resolve()))
 
 READER_USERNAME = os.getenv("HERMES_READER_USERNAME", "reader")
 READER_PASSWORD = os.getenv("HERMES_READER_PASSWORD", "reader123")
 WRITER_PASSWORD_PREFIX = os.getenv("HERMES_WRITER_PASSWORD_PREFIX", "writer")
+# 管理员账号
+ADMIN_USERNAME = os.getenv("HERMES_ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("HERMES_ADMIN_PASSWORD", "admin123")
 
+# 读者授权信息持久化到 readers.json
+READERS_FILE = Path(__file__).parent / "readers.json"
+def load_readers():
+    if READERS_FILE.exists():
+        try:
+            with open(READERS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return [{"username": READER_USERNAME, "password": READER_PASSWORD}]
+def save_readers(readers):
+    with open(READERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(readers, f, indent=2)
 
 def _get_session_user():
     user = session.get("auth_user")
-    if isinstance(user, dict) and user.get("role") in {"reader", "writer"}:
+    if isinstance(user, dict) and user.get("role") in {"reader", "writer","admin"}:
         return user
     return None
 
@@ -113,6 +148,9 @@ def _get_user_accessible_writer_ids():
         wid = user.get("writer_id")
         if isinstance(wid, int):
             return [wid]
+# 管理员可访问所有写者
+    if user.get("role") == "admin":
+        return list(range(get_server_num_writers()))
     return []
 
 
@@ -134,10 +172,20 @@ def _require_roles(roles):
             return fn(*args, **kwargs)
         return wrapper
     return decorator
-
+def _require_admin(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = _get_session_user()
+        if not user or user.get("role") != "admin":
+            if request.path.startswith("/api/"):
+                return jsonify({"success": False, "error": "Admin required"}), 403
+            return redirect(url_for("login_page"))
+        return fn(*args, **kwargs)
+    return wrapper
 
 def _get_active_epoch() -> int:
-    """返回当前会话的审计批次 Epoch（默认使用配置 HERMES_EPOCH）。"""
+    """
+    返回当前会话的审计批次 Epoch（默认使用配置 HERMES_EPOCH）。
     e = session.get("active_epoch", HERMES_EPOCH)
     try:
         e = int(e)
@@ -146,7 +194,8 @@ def _get_active_epoch() -> int:
     if e < 1:
         e = 1
     return e
-
+    """
+    return get_global_epoch()
 
 def get_server_num_writers() -> int:
     """
@@ -473,16 +522,12 @@ def _email_metadata_for_file(writer_id: int, file_id: int, email_writer_map: dic
     }
 
 
+
 def rebuild_database_for_writer(writer_id: int):
-    """
-    根据 database_paths 和磁盘上的文件内容，重建该用户的 keyword->fileID 索引，写入 database/(writer_id+1).txt。
-    格式与 extract_database.go 一致：每行 "关键词 fileID1 fileID2 ..."
-    返回 (成功, 错误信息)。
-    """
     path_file = _database_paths_file_path(writer_id)
     if not path_file.exists():
         return False, "database_paths 文件不存在"
-    keyword_to_ids = {}  # keyword -> list of file_id (with duplicates, then we dedup per line)
+    keyword_to_ids = {}
     for line in path_file.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) < 2:
@@ -504,22 +549,26 @@ def rebuild_database_for_writer(writer_id: int):
             content = abs_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        for kw in _extract_keywords_from_text(content):
+        # ---------- 应用黑白名单过滤 ----------
+        raw_kws = _extract_keywords_from_text(content)
+        kws = _apply_dict_filter(writer_id, raw_kws)
+        for kw in kws:
             if kw not in keyword_to_ids:
                 keyword_to_ids[kw] = []
             keyword_to_ids[kw].append(file_id)
+
     out_path = _database_file_path(writer_id)
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for kw in sorted(keyword_to_ids.keys()):
-            ids = list(dict.fromkeys(keyword_to_ids[kw]))  # 去重且保持顺序
+            ids = list(dict.fromkeys(keyword_to_ids[kw]))
             lines.append(kw + " " + " ".join(str(i) for i in ids))
         out_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         return True, ""
     except Exception as e:
         return False, str(e)
-
+      
 
 def _rebuild_database_for_writer_incremental(writer_id: int, file_id: int, new_content: str) -> tuple[bool, str]:
     """
@@ -572,8 +621,156 @@ def _rebuild_database_for_writer_incremental(writer_id: int, file_id: int, new_c
         return True, ""
     except Exception as e:
         return False, str(e)
+def _rebuild_database_for_writer_incremental_with_filter(writer_id: int, file_id: int, filtered_keywords: set) -> tuple[bool, str]:
+    """
+    增量重建的变体，直接使用传入的已过滤关键词集合，避免内部再次提取。
+    """
+    out_path = _database_file_path(writer_id)
+    if not out_path.exists():
+        return False, "no_database"
+    try:
+        keyword_to_ids = {}
+        for line in out_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            kw = parts[0]
+            ids = []
+            for s in parts[1:]:
+                try:
+                    ids.append(int(s))
+                except ValueError:
+                    continue
+            keyword_to_ids[kw] = ids
 
+        # 移除旧映射
+        for kw in list(keyword_to_ids.keys()):
+            if file_id in keyword_to_ids[kw]:
+                keyword_to_ids[kw] = [(-1 if x == file_id else x) for x in keyword_to_ids[kw]]
 
+        # 使用过滤后的关键词更新映射
+        for kw in filtered_keywords:
+            if kw not in keyword_to_ids:
+                keyword_to_ids[kw] = []
+            if file_id not in keyword_to_ids[kw]:
+                keyword_to_ids[kw].append(file_id)
+
+        lines = []
+        for kw in sorted(keyword_to_ids.keys()):
+            seen = set()
+            ids = []
+            for x in keyword_to_ids[kw]:
+                if x == -1:
+                    ids.append(x)
+                elif x not in seen:
+                    seen.add(x)
+                    ids.append(x)
+            lines.append(kw + " " + " ".join(str(i) for i in ids))
+        out_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+#管理员路由
+@app.route('/admin')
+@_require_admin
+def admin_home():
+    return render_template("admin.html", user=_get_session_user())
+
+# 全局 Epoch 管理 
+@app.route('/api/admin/epoch/advance', methods=['POST'])
+@_require_admin
+def advance_global_epoch():
+    data = request.get_json() or {}
+    target_epoch = data.get('target_epoch')
+
+    old = get_global_epoch()
+
+    if target_epoch is not None:
+        try:
+            target_epoch = int(target_epoch)
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "error": "target_epoch 必须是整数"}), 400
+        if target_epoch < 1 or target_epoch > 1024:
+            return jsonify({"success": False, "error": "target_epoch 必须在 1～1024"}), 400
+        new_epoch = target_epoch
+    else:
+        new_epoch = old + 1
+
+    if new_epoch <= old:
+        set_global_epoch(new_epoch)
+        return jsonify({"success": True, "old_epoch": old, "new_epoch": new_epoch,
+                        "message": f"Epoch 已设置为 {new_epoch}（未执行清理，因为 epoch 未增加）"})
+
+   
+    task_id = str(uuid.uuid4())
+    with admin_epoch_tasks_lock:
+        admin_epoch_tasks[task_id] = {
+            'status': 'pending',
+            'old_epoch': old,
+            'new_epoch': new_epoch,
+            'progress': 0,
+            'total_writers': 0,
+            'synced_writers': 0,
+            'message': ''
+        }
+
+    # 提交后台执行（传递 task_id, old, new）
+    admin_epoch_executor.submit(_run_epoch_advance, task_id, old, new_epoch)
+
+    return jsonify({
+        'success': True,
+        'task_id': task_id,
+        'message': f'审计 Epoch 推进任务已创建（{old} → {new_epoch}），后台执行中。可通过 /api/admin/epoch/task/{task_id} 查询进度。'
+    })
+
+def _run_epoch_advance(task_id, old_epoch, new_epoch):
+    try:
+        with admin_epoch_tasks_lock:
+            admin_epoch_tasks[task_id]['status'] = 'processing'
+
+        num_writers = get_server_num_writers()
+        with admin_epoch_tasks_lock:
+            admin_epoch_tasks[task_id]['total_writers'] = num_writers
+
+        cleaned_count = 0
+        for w_id in range(num_writers):
+            if _cleanup_expired_keywords_for_writer(w_id, new_epoch):
+                cleaned_count += 1
+            with admin_epoch_tasks_lock:
+                admin_epoch_tasks[task_id]['synced_writers'] = cleaned_count   # 仅用于进度展示
+                admin_epoch_tasks[task_id]['progress'] = int((w_id + 1) / num_writers * 100)
+
+        # 更新全局 Epoch
+        set_global_epoch(new_epoch)
+
+        # 全局索引重载，使过期关键词立即对读者不可见
+        reload_ok = True
+        if getattr(hermes_client, '_initialized', False):
+            try:
+                reload_ok = hermes_client.reload_index_from_database()
+            except Exception:
+                reload_ok = False
+
+        msg = f'全局 Epoch 已从 {old_epoch} 推进至 {new_epoch}，清理了 {cleaned_count} 个写者的过期关键词。'
+
+        msg += ' 索引已同步。'
+
+        with admin_epoch_tasks_lock:
+            admin_epoch_tasks[task_id]['status'] = 'completed'
+            admin_epoch_tasks[task_id]['message'] = msg
+    except Exception as e:
+        with admin_epoch_tasks_lock:
+            admin_epoch_tasks[task_id]['status'] = 'failed'
+            admin_epoch_tasks[task_id]['message'] = str(e)
+@app.route('/api/admin/epoch/task/<task_id>', methods=['GET'])
+@_require_admin
+def get_epoch_task_status(task_id):
+    with admin_epoch_tasks_lock:
+        task = admin_epoch_tasks.get(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'}), 404
+    return jsonify({'success': True, 'task': task})
+    
 @app.route('/')
 def index():
     user = _get_session_user()
@@ -581,6 +778,8 @@ def index():
         return redirect(url_for("login_page"))
     if user.get("role") == "reader":
         return redirect(url_for("reader_home"))
+    if user.get("role") == "admin":
+        return redirect(url_for("admin_home"))
     return redirect(url_for("writer_home"))
 
 
@@ -590,6 +789,8 @@ def login_page():
     if user:
         if user.get("role") == "reader":
             return redirect(url_for("reader_home"))
+        if user.get("role") == "admin":
+            return redirect(url_for("admin_home"))
         return redirect(url_for("writer_home"))
     return render_template('login.html')
 
@@ -601,7 +802,12 @@ def api_login():
         role = str(data.get("role", "")).strip().lower()
         password = str(data.get("password", ""))
         num_writers = get_server_num_writers()
-
+        if role == "admin":
+            username = str(data.get("username", "")).strip()
+            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                session["auth_user"] = {"role": "admin", "username": username}
+                return jsonify({"success": True, "role": "admin", "redirect": url_for("admin_home")})
+            return jsonify({"success": False, "error": "管理员账号或密码错误"}), 401
         if role == "reader":
             username = str(data.get("username", "")).strip()
             if username == READER_USERNAME and password == READER_PASSWORD:
@@ -682,7 +888,7 @@ def status():
         'server_address': CLIENT_CONFIG['server_address'],
         'num_writers': num_writers,
         'search_mode': mode,
-        'epoch': _get_active_epoch(),
+        'epoch': get_global_epoch(), # 'epoch': _get_active_epoch(),
         'default_epoch': HERMES_EPOCH,
         'allowed_writers': allowed,
         'allowed_writers_count': len(allowed),
@@ -827,14 +1033,43 @@ def search():
             }), 500
 
         results = (result or {}).get('results', [])
+        # 【TTL 过滤】用本地 database 验证 C++ 返回的命中是否仍有效
+        # 避免 C++ 索引与本地 database 不一致导致过期数据泄露
+        filtered_results = []
+        for r in results:
+            wid = r.get('writer_id') - 1  # C++ 返回 1-based，转 0-based
+            db_path = _database_file_path(wid)
+            valid_ids = set()
+            
+            if db_path.exists():
+                for line in db_path.read_text(encoding='utf-8', errors='replace').splitlines():
+                    parts = line.strip().split()
+                    if len(parts) < 2:
+                        continue
+                    kw = parts[0]
+                    if kw.lower() == keyword.lower():
+                        for s in parts[1:]:
+                            try:
+                                fid = int(s)
+                                if fid > 0:
+                                    valid_ids.add(fid)
+                            except ValueError:
+                                continue
+            
+            kept_ids = [fid for fid in r.get('file_ids', []) if fid in valid_ids]
+            if kept_ids:
+                filtered_results.append({
+                    'writer_id': r['writer_id'],
+                    'file_ids': kept_ids
+                })
+        
         return jsonify({
             'success': True,
             'keyword': keyword,
-            'results': results,
+            'results': filtered_results, 
             'search_time_ms': search_time_ms,
             'epoch': active_epoch,
         })
-        
     except Exception as e:
         return jsonify({
             'success': False,
@@ -845,25 +1080,6 @@ def search():
 @app.route('/api/update', methods=['POST'])
 @_require_roles({"writer"})
 def update():
-    """
-    更新API
-    
-    请求格式:
-    {
-        "writer_id": 0,
-        "keyword": "security",
-        "file_id": 2025,
-        "file_path": "./maildir/allen-p/all_documents/555."   // 可选，仅当 file_id 为新文档时填写，用于同步 database_paths
-    }
-    
-    返回格式:
-    {
-        "success": true,
-        "message": "Update successful",
-        "database_synced": true,
-        "database_paths_synced": false
-    }
-    """
     try:
         data = request.get_json()
         
@@ -878,7 +1094,7 @@ def update():
         writer_id = int(data['writer_id'])
         keyword = data['keyword'].strip()
         file_id = int(data['file_id'])
-        file_path = data.get('file_path', "").strip()  # 可选：新文档时填写，用于同步 database_paths
+        file_path = data.get('file_path', "").strip()
         
         allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
@@ -897,7 +1113,16 @@ def update():
                 'success': False,
                 'error': 'Keyword cannot be empty'
             }), 400
-        
+
+        # 黑名单拦截 
+        # 如果关键词在黑名单中，则拒绝添加
+        blacklist = _load_list(_get_blacklist_file(writer_id))
+        if keyword.lower() in [w.lower() for w in blacklist]:
+            return jsonify({
+                'success': False,
+                'error': f'关键词 "{keyword}" 当前在黑名单中，无法添加到索引。'
+            }), 400
+
         # 执行索引更新（C++ 客户端发往 Hermes 服务器）
         success = hermes_client.update(writer_id, keyword, file_id)
         
@@ -946,7 +1171,6 @@ def update():
             'error': f'Update failed: {str(e)}'
         }), 500
 
-
 @app.route('/api/document-content', methods=['GET'])
 @_require_roles({"writer"})
 def document_content():
@@ -980,11 +1204,6 @@ def document_content():
 @app.route('/api/update-document', methods=['POST'])
 @_require_roles({"writer"})
 def update_document():
-    """
-    更新文件：用 new_content 覆盖指定用户、文件ID 对应的原文，重建该用户的 database 索引，
-    并对新内容中的每个关键字调用 C++ 服务端 update，使无需重启即可检索。
-    请求体: { "writer_id": 0, "file_id": 123, "new_content": "新文件内容..." }
-    """
     try:
         data = request.get_json()
         if not data:
@@ -996,21 +1215,19 @@ def update_document():
             return jsonify({'success': False, 'error': 'Missing writer_id or file_id'}), 400
         writer_id = int(writer_id)
         file_id = int(file_id)
-        if new_content is None:
-            new_content = ''
-        else:
-            new_content = str(new_content)
+        new_content = str(new_content) if new_content is not None else ''
         allowed = _get_user_accessible_writer_ids()
         if writer_id not in allowed:
             return jsonify({'success': False, 'error': f'writer_id={writer_id} not allowed'}), 403
         path = get_file_path_from_database_paths(writer_id, file_id)
         if path is None:
-            return jsonify({'success': False, 'error': f'未在 database_paths 中找到该用户、文件ID 对应路径'}), 404
+            return jsonify({'success': False, 'error': '未在 database_paths 中找到该文件路径'}), 404
         if not path.exists():
             return jsonify({'success': False, 'error': f'文件不存在: {path}'}), 404
-        # 1) 在覆盖前读取当前 database，用于「删除」旧关键字映射（标准流程：清理旧搜索映射）
+
+        # 1. 读取旧 database 用于后续增量同步
         db_path = _database_file_path(writer_id)
-        keyword_to_ids_old: dict[str, list[int]] = {}
+        keyword_to_ids_old = {}
         if db_path.exists():
             for line in db_path.read_text(encoding='utf-8', errors='replace').splitlines():
                 parts = line.strip().split()
@@ -1024,33 +1241,36 @@ def update_document():
                     except ValueError:
                         continue
                 keyword_to_ids_old[kw] = ids
+
         old_keywords = {kw for kw, ids in keyword_to_ids_old.items() if file_id in ids}
-        new_keywords = set(_extract_keywords_from_text(new_content))
-        # 2) 物理存储更新：替换原文件内容（文件 ID 不变）
+
+        raw_new_keywords = set(_extract_keywords_from_text(new_content))
+        new_keywords = set(_apply_dict_filter(writer_id, list(raw_new_keywords)))
+
+        # 2. 覆盖物理文件
         path.write_text(new_content, encoding='utf-8')
-        # 3) 本地 database 重建（增量或全量）
-        ok, err = _rebuild_database_for_writer_incremental(writer_id, file_id, new_content)
+
+        # 3. 本地 database 增量重建（传入过滤后的关键词集合，避免函数内部再次提取）
+        ok, err = _rebuild_database_for_writer_incremental_with_filter(writer_id, file_id, new_keywords)
         if not ok:
+            # 回退到全量重建（全量重建中也需要应用过滤）
             ok, err = rebuild_database_for_writer(writer_id)
         if not ok:
             return jsonify({
                 'success': False,
                 'error': f'文件已覆盖，但重建 database 失败: {err}',
             }), 500
-        # 4) 同步到服务端：标准流程「先删旧关键字映射，再建新映射」或（无现有 database 时）全量清空后推送
+
+        # 4. 同步到服务端（逻辑保持不变，但使用过滤后的 new_keywords）
         server_updated = 0
         if getattr(hermes_client, '_initialized', False):
             if keyword_to_ids_old and db_path.exists():
-                # 增量：对不再适用的旧关键字发 op=删除，再对提取出的新关键字发 op=添加
                 to_del_kw = list(old_keywords - new_keywords)
                 if to_del_kw and getattr(hermes_client, 'delete_updates', None):
                     counts_del, file_ids_prev_del = [], []
                     for kw in to_del_kw:
                         ids = keyword_to_ids_old.get(kw, [])
                         try:
-                            # 找出实际的 count（即排除占位符后的索引位置）
-                            # 因为之前可能是 -1 占位，我们需要找到当前这个 file_id 在“真正的链”中的位置
-                            # 幸好这里是获取“旧”映射的位置，old_keywords 里还没替换成 -1
                             idx = ids.index(file_id)
                         except ValueError:
                             continue
@@ -1060,15 +1280,11 @@ def update_document():
                         hermes_client.delete_updates(writer_id, to_del_kw, counts_del, file_ids_prev_del)
                 if getattr(hermes_client, 'load_update_state', None):
                     hermes_client.load_update_state(writer_id)
-                # 只对「新出现」的关键字发添加（已在链中的不重复添加）
                 to_add_kw = list(new_keywords - old_keywords)
                 if to_add_kw:
-                    kw_add = to_add_kw
-                    id_add = [file_id] * len(to_add_kw)
-                    if hermes_client.batch_update(writer_id, kw_add, id_add):
-                        server_updated = len(kw_add)
+                    if hermes_client.batch_update(writer_id, to_add_kw, [file_id] * len(to_add_kw)):
+                        server_updated = len(to_add_kw)
             else:
-                # 无现有 database：清空该写者后整份推送
                 if getattr(hermes_client, 'clear_writer', None) and hermes_client.clear_writer(writer_id):
                     getattr(hermes_client, 'reset_update_state', lambda _: None)(writer_id)
                     if db_path.exists():
@@ -1086,10 +1302,11 @@ def update_document():
                                     continue
                         if keywords_list and hermes_client.batch_update(writer_id, keywords_list, file_ids_list):
                             server_updated = len(keywords_list)
+
         return jsonify({
             'success': True,
-            'message': f'已更新文件并重建该用户关键字索引（database）。' + (
-                f'已按标准流程同步到服务端（删除旧映射+添加新映射），可直接检索。' if server_updated else '未连接 C++ 服务或不可用，请连接后重试或重启 server 后从 database 加载。'
+            'message': f'已更新文件并重建索引（已应用黑白名单）。' + (
+                f'已同步到服务端。' if server_updated else '未连接 C++ 服务，请手动重新加载索引。'
             ),
             'index_updated_on_server': server_updated > 0,
         })
@@ -1348,86 +1565,6 @@ def delete_keyword():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/writer/stats', methods=['GET'])
-@_require_roles({"writer"})
-def writer_stats():
-    """
-    获取当前写者的关键字统计信息（用于图表展示）
-    返回: 关键字分布、文件关联度等统计数据
-    """
-    try:
-        user = _get_session_user()
-        writer_id = user.get("writer_id")
-        
-        db_path = _database_file_path(writer_id)
-        if not db_path.exists():
-            return jsonify({
-                'success': True,
-                'keyword_distribution': [],
-                'top_keywords': [],
-                'file_keyword_count': []
-            })
-        
-        keywords = []
-        file_keyword_count = {}  # file_id -> keyword count
-        
-        for line in db_path.read_text(encoding="utf-8", errors='replace').splitlines():
-            parts = line.strip().split()
-            if len(parts) < 2:
-                continue
-            kw = parts[0]
-            ids = []
-            for s in parts[1:]:
-                try:
-                    fid = int(s)
-                    if fid > 0:
-                        ids.append(fid)
-                        file_keyword_count[fid] = file_keyword_count.get(fid, 0) + 1
-                except ValueError:
-                    continue
-            if ids:
-                keywords.append({'keyword': kw, 'count': len(ids), 'file_ids': ids})
-        
-        # Top 10 关键字（按关联文件数）
-        top_keywords = sorted(keywords, key=lambda x: x['count'], reverse=True)[:10]
-        
-        # 关键字关联文件数分布（用于柱状图）
-        # 1个文件, 2个文件, 3-5个文件, 6-10个文件, 10+个文件
-        distribution = {
-            'single': 0,     
-            'small': 0,       
-            'medium': 0,      
-            'large': 0       
-        }
-        for k in keywords:
-            c = k['count']
-            if c == 1:
-                distribution['single'] += 1
-            elif c <= 3:
-                distribution['small'] += 1
-            elif c <= 10:
-                distribution['medium'] += 1
-            else:
-                distribution['large'] += 1
-        
-        # 文件关键字数量分布（用于饼图）
-        file_kw_dist = {}
-        for count in file_keyword_count.values():
-            file_kw_dist[count] = file_kw_dist.get(count, 0) + 1
-        
-        return jsonify({
-            'success': True,
-            'writer_id': writer_id,
-            'total_keywords': len(keywords),
-            'total_files_with_keywords': len(file_keyword_count),
-            'top_keywords': top_keywords,
-            'keyword_distribution': distribution,
-            'file_keyword_distribution': [{'keyword_count': k, 'file_count': v} for k, v in sorted(file_kw_dist.items())]
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
 @app.route('/api/writer/search-own', methods=['POST'])
 @_require_roles({"writer"})
 def writer_search_own():
@@ -1463,7 +1600,7 @@ def writer_search_own():
                 for s in parts[1:]:
                     try:
                         fid = int(s)
-                        if fid > 0:
+                        if fid > 0:          # 过滤占位符 -1
                             ids.append(fid)
                     except ValueError:
                         continue
@@ -1485,6 +1622,7 @@ def writer_search_own():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/document', methods=['POST'])
 @_require_roles({"reader"})
 def get_document():
@@ -1618,13 +1756,6 @@ def email_metadata_batch():
 @app.route('/api/writer/create-file', methods=['POST'])
 @_require_roles({"writer"})
 def writer_create_file():
-    """
-    写者创建新文件
-    请求: {
-        "path": "可选，相对路径（如 maildir/writer1/new.txt）",
-        "content": "文件内容"
-    }
-    """
     try:
         data = request.get_json()
         if not data or 'content' not in data:
@@ -1650,7 +1781,7 @@ def writer_create_file():
         while new_file_id in existing_ids:
             new_file_id += 1
 
-        # 2. 确定文件存储路径（安全限制：必须在 PROJECT_ROOT 下）
+        # 2. 确定文件存储路径（安全限制）
         if not raw_path:
             relative_path = f"maildir/writer{writer_id + 1}/doc_{new_file_id}.txt"
         else:
@@ -1666,8 +1797,10 @@ def writer_create_file():
         with open(paths_file, 'a', encoding='utf-8') as f:
             f.write(f"{new_file_id} {relative_path}\n")
 
-        # 4. 提取关键字，更新 database 文件（增量）
-        new_keywords = set(_extract_keywords_from_text(content))
+        raw_keywords = list(set(_extract_keywords_from_text(content)))
+        keywords = _apply_dict_filter(writer_id, raw_keywords)
+
+        # 4. 更新 database 索引
         db_path = _database_file_path(writer_id)
         keyword_to_ids = {}
         if db_path.exists():
@@ -1686,7 +1819,7 @@ def writer_create_file():
                         continue
                 keyword_to_ids[kw] = ids
 
-        for kw in new_keywords:
+        for kw in keywords:         
             if kw in keyword_to_ids:
                 if new_file_id not in keyword_to_ids[kw]:
                     keyword_to_ids[kw].append(new_file_id)
@@ -1699,10 +1832,10 @@ def writer_create_file():
             lines.append(f"{kw} {ids_str}")
         db_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding='utf-8')
 
-        # 5. 同步到 C++ 服务端（如果可用）
+        # 5. 同步到 C++ 服务端
         server_updated = 0
         if getattr(hermes_client, '_initialized', False):
-            keywords_list = list(new_keywords)
+            keywords_list = list(keywords)
             file_ids_list = [new_file_id] * len(keywords_list)
             if keywords_list and hermes_client.batch_update(writer_id, keywords_list, file_ids_list):
                 server_updated = len(keywords_list)
@@ -1711,12 +1844,315 @@ def writer_create_file():
             'success': True,
             'file_id': new_file_id,
             'path': str(relative_path),
-            'message': f'文件创建成功，ID={new_file_id}，已建立 {len(new_keywords)} 个关键字索引。' +
+            'message': f'文件创建成功，ID={new_file_id}，已建立 {len(keywords)} 个关键字索引。' +
                        ('已同步到服务端。' if server_updated else '未连接 C++ 服务，请稍后点击「重新加载索引」。')
         })
-
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+@app.route('/api/writer/batch-create-files', methods=['POST'])
+@_require_roles({"writer"})
+def writer_batch_create_files():
+    try:
+        data = request.get_json()
+        if not data or 'files' not in data:
+            return jsonify({'success': False, 'error': 'Missing files array'}), 400
+        
+        files_data = data['files']
+        if not isinstance(files_data, list) or len(files_data) == 0:
+            return jsonify({'success': False, 'error': 'files must be a non-empty array'}), 400
+        
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        
+        # 1. 一次性获取现有最大 file_id
+        paths_file = _database_paths_file_path(writer_id)
+        existing_ids = set()
+        if paths_file.exists():
+            for line in paths_file.read_text(encoding='utf-8', errors='replace').splitlines():
+                parts = line.strip().split(None, 1)
+                if parts:
+                    try:
+                        existing_ids.add(int(parts[0]))
+                    except ValueError:
+                        continue
+        next_id = 1
+        while next_id in existing_ids:
+            next_id += 1
+        
+        # 准备收集新数据
+        new_paths_lines = []     
+        new_keyword_map = {}     
+        results = []
+        
+        # 2. 逐个处理文件，但只生成物理文件和收集映射
+        for file_info in files_data:
+            filename = file_info.get('filename', 'unknown')
+            content = file_info.get('content', '')
+            if not content:
+                results.append({'filename': filename, 'success': False, 'error': '文件内容为空'})
+                continue
+            
+            try:
+                file_id = next_id
+                next_id += 1
+                
+                # 生成相对路径并存储物理文件
+                from pathlib import Path
+                import time, os
+                base, ext = os.path.splitext(filename)
+                safe_name = f"{base}_{int(time.time())}_{file_id}{ext}" if ext else f"{base}_{int(time.time())}_{file_id}"
+                relative_path = f"maildir/writer{writer_id + 1}/batch/{safe_name}"
+                safe_path = Path(PROJECT_ROOT) / relative_path
+                safe_path = safe_path.resolve()
+                if not str(safe_path).startswith(str(PROJECT_ROOT.resolve())):
+                    raise ValueError("路径非法")
+                safe_path.parent.mkdir(parents=True, exist_ok=True)
+                safe_path.write_text(content, encoding='utf-8')
+                
+                # 提取关键字并应用黑白名单过滤
+                raw_keywords = list(set(_extract_keywords_from_text(content)))
+                keywords = _apply_dict_filter(writer_id, raw_keywords)
+                
+                # 记录到批量映射中
+                new_paths_lines.append(f"{file_id} {relative_path}")
+                for kw in keywords:
+                    new_keyword_map.setdefault(kw, []).append(file_id)
+                
+                results.append({
+                    'filename': filename,
+                    'success': True,
+                    'file_id': file_id,
+                    'path': relative_path,
+                    'keywords_count': len(keywords)
+                })
+            except Exception as e:
+                results.append({'filename': filename, 'success': False, 'error': str(e)})
+        
+        # 3. 一次性写入 database_paths（追加）
+        if new_paths_lines:
+            with open(paths_file, 'a', encoding='utf-8') as f:
+                f.write("\n".join(new_paths_lines) + ("\n" if new_paths_lines else ""))
+        
+        # 4. 一次性更新 database（关键字索引）
+        db_path = _database_file_path(writer_id)
+        keyword_to_ids = {}
+        if db_path.exists():
+            for line in db_path.read_text(encoding='utf-8', errors='replace').splitlines():
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                kw = parts[0]
+                ids = []
+                for s in parts[1:]:
+                    try:
+                        fid = int(s)
+                        if fid > 0:
+                            ids.append(fid)
+                    except ValueError:
+                        continue
+                keyword_to_ids[kw] = ids
+        
+        # 合并新关键字映射
+        for kw, new_ids in new_keyword_map.items():
+            if kw in keyword_to_ids:
+                existing = set(keyword_to_ids[kw])
+                existing.update(new_ids)
+                keyword_to_ids[kw] = sorted(existing)
+            else:
+                keyword_to_ids[kw] = sorted(set(new_ids))
+        
+        # 写回 database
+        lines = []
+        for kw in sorted(keyword_to_ids.keys()):
+            ids_str = " ".join(str(i) for i in keyword_to_ids[kw])
+            lines.append(f"{kw} {ids_str}")
+        db_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding='utf-8')
+        
+        # 5. 批量同步 C++ 服务端
+        all_pairs = []
+        for kw, ids in new_keyword_map.items():
+            for fid in ids:
+                all_pairs.append((kw, fid))
+        cpp_synced = False
+        if all_pairs and getattr(hermes_client, '_initialized', False):
+            try:
+                keywords_list, file_ids_list = zip(*all_pairs)
+                if hermes_client.batch_update(writer_id, list(keywords_list), list(file_ids_list)):
+                    cpp_synced = True
+            except Exception:
+                pass
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'total_success': sum(1 for r in results if r['success']),
+            'total_failed': sum(1 for r in results if not r['success']),
+            'cpp_synced': cpp_synced,
+            'message': f'批量处理完成。{"已同步至C++服务端。" if cpp_synced else "本地索引已更新，但未连接C++服务，请点击「重新加载索引」。"}'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+@app.route('/api/writer/batch-import-zip', methods=['POST'])
+@_require_roles({"writer"})
+def batch_import_zip():
+    """接收一个 ZIP 文件，解压到临时目录，然后提交后台处理。"""
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': '没有上传文件'}), 400
+    file = request.files['file']
+    if not file.filename.lower().endswith('.zip'):
+        return jsonify({'success': False, 'error': '仅支持 ZIP 文件'}), 400
+
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+
+    # 创建临时目录（放在 PROJECT_ROOT 下以保证相对路径可用，处理完后删除）
+    temp_root = PROJECT_ROOT / 'temp_imports'
+    temp_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(dir=str(temp_root))
+    try:
+        zip_path = os.path.join(temp_dir, 'upload.zip')
+        file.save(zip_path)
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(temp_dir)
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({'success': False, 'error': f'ZIP 文件解析失败: {str(e)}'}), 400
+
+    task_id = str(uuid.uuid4())
+    with batch_tasks_lock:
+        batch_tasks[task_id] = {'status': 'pending', 'progress': 0, 'total': 0, 'done': 0, 'result': None}
+
+    def zip_wrapper():
+        try:
+            process_directory(task_id, temp_dir, writer_id)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    batch_executor.submit(zip_wrapper)
+    return jsonify({'success': True, 'task_id': task_id})
+# ---------- 批量导入任务存储（全局） ----------
+batch_tasks = {}
+batch_tasks_lock = threading.Lock()
+batch_executor = ThreadPoolExecutor(max_workers=2)
+admin_epoch_tasks = {}
+admin_epoch_tasks_lock = threading.Lock()
+admin_epoch_executor = ThreadPoolExecutor(max_workers=1)  
+def process_directory(task_id, dir_path, writer_id):
+    try:
+        with batch_tasks_lock:
+            batch_tasks[task_id]['status'] = 'processing'
+        dir_path = Path(dir_path)
+        if not dir_path.exists() or not dir_path.is_dir():
+            raise ValueError("目录不存在或不可访问")
+
+        files = list(dir_path.rglob('*'))
+        files = [f for f in files if f.is_file() and f.suffix.lower() in ('.txt', '.md', '.eml', '.csv', '.log')]
+        total = len(files)
+        with batch_tasks_lock:
+            batch_tasks[task_id]['total'] = total
+            batch_tasks[task_id]['done'] = 0
+
+        paths_file = _database_paths_file_path(writer_id)
+        existing_ids = set()
+        if paths_file.exists():
+            for line in paths_file.read_text(encoding='utf-8', errors='replace').splitlines():
+                parts = line.strip().split(None, 1)
+                if parts:
+                    try:
+                        existing_ids.add(int(parts[0]))
+                    except:
+                        pass
+        next_id = 1
+        while next_id in existing_ids:
+            next_id += 1
+
+        all_keywords = []   # (keyword, file_id)
+        project_root = PROJECT_ROOT.resolve()
+        # 永久存储目录（项目内），确保文件不会被自动清理
+        import_base = project_root / 'imported' / f'writer_{writer_id}'
+        import_base.mkdir(parents=True, exist_ok=True)
+
+        for idx, file_path in enumerate(files):
+            try:
+                content = file_path.read_text(encoding='utf-8', errors='replace')
+            except:
+                continue
+
+            raw_keywords = list(set(_extract_keywords_from_text(content)))
+            keywords = _apply_dict_filter(writer_id, raw_keywords)
+            if not keywords:
+                continue
+
+            file_id = next_id
+            next_id += 1
+
+            # 一律复制到永久目录，避免临时文件被清理后无法访问
+            safe_name = f"{file_path.stem}_{uuid.uuid4().hex[:8]}{file_path.suffix}"
+            dst_path = import_base / safe_name
+            shutil.copy2(file_path.resolve(), dst_path)
+            relative_path = str(dst_path.relative_to(project_root))
+
+            with open(paths_file, 'a', encoding='utf-8') as pf:
+                pf.write(f"{file_id} {relative_path}\n")
+
+            for kw in keywords:
+                all_keywords.append((kw, file_id))
+
+            with batch_tasks_lock:
+                batch_tasks[task_id]['done'] = idx + 1
+                batch_tasks[task_id]['progress'] = int((idx + 1) / total * 100) if total > 0 else 100
+
+        # 合并到 database
+        db_path = _database_file_path(writer_id)
+        keyword_to_ids = {}
+        if db_path.exists():
+            for line in db_path.read_text(encoding='utf-8').splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    kw = parts[0]
+                    ids = [int(x) for x in parts[1:] if x.lstrip('-').isdigit()]
+                    keyword_to_ids[kw] = ids
+        for kw, fid in all_keywords:
+            if kw not in keyword_to_ids:
+                keyword_to_ids[kw] = []
+            if fid not in keyword_to_ids[kw]:
+                keyword_to_ids[kw].append(fid)
+        lines = []
+        for kw in sorted(keyword_to_ids.keys()):
+            lines.append(kw + " " + " ".join(str(i) for i in keyword_to_ids[kw]))
+        db_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding='utf-8')
+
+        if getattr(hermes_client, '_initialized', False) and all_keywords:
+            kw_list, fid_list = zip(*all_keywords)
+            hermes_client.batch_update(writer_id, list(kw_list), list(fid_list))
+
+        with batch_tasks_lock:
+            batch_tasks[task_id]['status'] = 'completed'
+            batch_tasks[task_id]['result'] = {'total_files': total, 'indexed_files': len(all_keywords)}
+    except Exception as e:
+        with batch_tasks_lock:
+            batch_tasks[task_id]['status'] = 'failed'
+            batch_tasks[task_id]['result'] = {'error': str(e)}
+
+# 查询任务状态（ZIP/目录通用）
+@app.route('/api/writer/batch-task/<task_id>', methods=['GET'])
+@_require_roles({"writer"})
+def get_batch_task_status(task_id):
+    with batch_tasks_lock:
+        task = batch_tasks.get(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'}), 404
+    return jsonify({
+        'success': True,
+        'status': task['status'],
+        'progress': task.get('progress', 0),
+        'total': task.get('total', 0),
+        'done': task.get('done', 0),
+        'result': task.get('result')
+    })
+
+
 # 写者删除文件 
 @app.route('/api/writer/delete-file', methods=['POST'])
 @_require_roles({"writer"})
@@ -1802,6 +2238,346 @@ def writer_delete_file():
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+@app.route('/api/writer/preview-keywords', methods=['POST'])
+@_require_roles({"writer"})
+def preview_keywords():
+    """返回文本中提取并过滤后的关键词列表，且仅包含当前 database 中仍存在的关键词（匹配 TTL 清理后的状态）"""
+    data = request.get_json()
+    if not data or 'content' not in data:
+        return jsonify({'success': False, 'error': 'Missing content'}), 400
+
+    content = data['content']
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+
+    # 1. 正常提取并过滤黑白名单
+    raw_keywords = list(set(_extract_keywords_from_text(content)))
+    keywords = _apply_dict_filter(writer_id, raw_keywords)
+
+    # 2. 获取当前 database 中存在的关键词集合（只有这些才实际可被检索）
+    existing_keywords = set()
+    db_path = _database_file_path(writer_id)
+    if db_path.exists():
+        for line in db_path.read_text(encoding='utf-8', errors='replace').splitlines():
+            parts = line.strip().split()
+            if parts:
+                existing_keywords.add(parts[0])
+
+    # 3. 只保留仍在 database 中的关键词
+    final_keywords = [kw for kw in keywords if kw in existing_keywords]
+
+    return jsonify({
+        'success': True,
+        'keywords': sorted(final_keywords),
+        'count': len(final_keywords)
+    })
+#写者独立索引版本 
+WRITER_CLEAR_VERSION_DIR = Path(__file__).parent / "writer_clear_versions"
+WRITER_CLEAR_VERSION_DIR.mkdir(exist_ok=True)
+
+def _get_writer_clear_version_file(writer_id: int) -> Path:
+    return WRITER_CLEAR_VERSION_DIR / f"clear_{writer_id}.txt"
+
+def get_writer_clear_version(writer_id: int) -> int:
+    fpath = _get_writer_clear_version_file(writer_id)
+    if fpath.exists():
+        try:
+            return int(fpath.read_text().strip())
+        except:
+            return 1
+    return 1
+
+def set_writer_clear_version(writer_id: int, version: int):
+    fpath = _get_writer_clear_version_file(writer_id)
+    fpath.write_text(str(version))
+
+@app.route('/api/writer/epoch', methods=['GET'])
+@_require_roles({"writer"})
+def get_writer_epoch_info():
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    current = get_writer_clear_version(writer_id)
+    is_cleared = (current > 1)
+    return jsonify({
+        'success': True,
+        'index_version': current,
+        'previous_index_version': current - 1,
+        'is_index_cleared': is_cleared,
+        'message': '索引已清空，旧搜索令牌失效' if is_cleared else '索引正常'
+    })
+
+@app.route('/api/writer/epoch/advance', methods=['POST'])
+@_require_roles({"writer"})
+def advance_writer_epoch():
+    try:
+        user = _get_session_user()
+        writer_id = user.get("writer_id")
+        old_version = get_writer_clear_version(writer_id)
+        new_version = old_version + 1
+        
+        db_path = _database_file_path(writer_id)
+        if db_path.exists():
+            backup_dir = DATABASE_DIR / f"index_backups/writer_{writer_id}"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"version_{old_version}_{timestamp}.txt"
+            shutil.copy(db_path, backup_path)
+        
+        db_path.write_text("", encoding='utf-8')
+        
+        if getattr(hermes_client, '_initialized', False):
+            if hasattr(hermes_client, 'clear_writer'):
+                hermes_client.clear_writer(writer_id)
+            if hasattr(hermes_client, 'reset_update_state'):
+                hermes_client.reset_update_state(writer_id)
+            if hasattr(hermes_client, 'load_update_state'):
+                hermes_client.load_update_state(writer_id)
+        
+        set_writer_clear_version(writer_id, new_version)
+        
+        return jsonify({
+            'success': True,
+            'old_version': old_version,
+            'new_version': new_version,
+            'message': f'索引已从版本 {old_version} 升级到 {new_version}。旧索引已备份，审计员无法检索。'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+#  关键词 TTL 
+TTL_DIR = Path(__file__).parent / "keyword_ttl"
+TTL_DIR.mkdir(exist_ok=True)
+
+def _get_ttl_file(writer_id: int) -> Path:
+    return TTL_DIR / f"ttl_{writer_id}.json"
+
+def load_ttl(writer_id: int) -> dict:
+    fpath = _get_ttl_file(writer_id)
+    if fpath.exists():
+        try:
+            return json.loads(fpath.read_text())
+        except:
+            return {}
+    return {}
+
+def save_ttl(writer_id: int, ttl_dict: dict):
+    fpath = _get_ttl_file(writer_id)
+    fpath.write_text(json.dumps(ttl_dict, indent=2))
+    
+def _cleanup_expired_keywords_for_writer(writer_id: int, global_epoch: int) -> bool:
+    """清理过期关键词，返回 True 表示发生了实际清理"""
+    ttl = load_ttl(writer_id)
+    expired = [kw for kw, exp in ttl.items() if exp <= global_epoch]
+    if not expired:
+        return False
+    db_path = _database_file_path(writer_id)
+    if db_path.exists():
+        lines = db_path.read_text(encoding='utf-8').splitlines()
+        new_lines = [line for line in lines if not any(line.startswith(kw + ' ') for kw in expired)]
+        db_path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""))
+    for kw in expired:
+        del ttl[kw]
+    save_ttl(writer_id, ttl)
+    return True
+
+    
+   
+
+@app.route('/api/writer/ttl', methods=['GET'])
+@_require_roles({"writer"})
+def get_ttl():
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    ttl = load_ttl(writer_id)
+    return jsonify({'success': True, 'ttl': ttl})
+
+@app.route('/api/writer/ttl', methods=['POST'])
+@_require_roles({"writer"})
+def set_keyword_ttl():
+    data = request.get_json()
+
+    # 1. 参数提取与校验
+    keyword = data.get('keyword', '').strip()
+    if not keyword:
+        return jsonify({'success': False, 'error': '关键词不能为空'}), 400
+
+    requested_ttl = data.get('expire_epoch')
+    if not isinstance(requested_ttl, int):
+        return jsonify({'success': False, 'error': 'expire_epoch 必须是整数'}), 400
+    if requested_ttl < 1:
+        return jsonify({'success': False, 'error': 'expire_epoch 必须 >= 1'}), 400
+
+    # 2. 获取写者身份
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+
+    # 3. 强制最短保留期
+    MIN_TTL = int(os.getenv("HERMES_MIN_TTL", "5"))   # 支持通过环境变量配置
+    current_epoch = get_global_epoch()
+    effective_ttl = max(requested_ttl, current_epoch + MIN_TTL)
+
+    # 4. 加载现有 TTL、合并、保存
+    ttl = load_ttl(writer_id)
+    ttl[keyword] = effective_ttl
+    save_ttl(writer_id, ttl)
+
+    return jsonify({
+        'success': True,
+        'keyword': keyword,
+        'requested_epoch': requested_ttl,
+        'effective_epoch': effective_ttl,
+        'message': f'关键词 "{keyword}" 有效期至 Epoch {effective_ttl}'
+    })
+  
+@app.route('/api/writer/ttl/cleanup', methods=['POST'])
+@_require_roles({"writer"})
+def manual_cleanup_ttl():
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    current_epoch = get_global_epoch()
+    cleaned = _cleanup_expired_keywords_for_writer(writer_id, current_epoch)
+    
+    # 【兜底】如果该写者发生了清理且 C++ 客户端已连接，reload 确保全局一致
+    if cleaned and getattr(hermes_client, '_initialized', False):
+        try:
+            hermes_client.reload_index_from_database()
+        except Exception:
+            pass
+    
+    return jsonify({'success': True, 'message': '已清理过期关键词'})
+# 后台自动清理线程（在启动时启用）
+def ttl_cleanup_loop():
+    import time
+    while True:
+        time.sleep(3600)
+        try:
+            global_epoch = get_global_epoch()
+            num = get_server_num_writers()
+            any_cleaned = False
+            for w_id in range(num):
+                if _cleanup_expired_keywords_for_writer(w_id, global_epoch):
+                    any_cleaned = True
+            
+            # 【新增】如果发生了清理，统一 reload 确保 C++ 服务端同步
+            if any_cleaned and getattr(hermes_client, '_initialized', False):
+                try:
+                    hermes_client.reload_index_from_database()
+                except Exception:
+                    pass
+        except:
+            pass
+#  黑/白名单管理（每个写者独立） 
+BLACKLIST_DIR = Path(__file__).parent / "keyword_lists"
+BLACKLIST_DIR.mkdir(exist_ok=True)
+
+def _get_blacklist_file(writer_id: int) -> Path:
+    return BLACKLIST_DIR / f"blacklist_{writer_id}.txt"
+
+def _get_whitelist_file(writer_id: int) -> Path:
+    return BLACKLIST_DIR / f"whitelist_{writer_id}.txt"
+
+def _load_list(file_path: Path) -> list:
+    if not file_path.exists():
+        return []
+    return [line.strip() for line in file_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+def _save_list(file_path: Path, items: list):
+    file_path.write_text("\n".join(items), encoding='utf-8')
+
+def _apply_dict_filter(writer_id: int, keywords: list) -> list:
+    blacklist = _load_list(_get_blacklist_file(writer_id))
+    whitelist = _load_list(_get_whitelist_file(writer_id))
+    filtered = [kw for kw in keywords if kw not in blacklist]
+    for w in whitelist:
+        if w not in filtered:
+            filtered.append(w)
+    return filtered
+
+@app.route('/api/writer/blacklist', methods=['GET'])
+@_require_roles({"writer"})
+def get_blacklist():
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    items = _load_list(_get_blacklist_file(writer_id))
+    return jsonify({'success': True, 'blacklist': items})
+
+@app.route('/api/writer/blacklist', methods=['POST'])
+@_require_roles({"writer"})
+def add_blacklist():
+    data = request.get_json()
+    word = data.get('word', '').strip().lower()
+    if not word:
+        return jsonify({'success': False, 'error': '关键词不能为空'}), 400
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    path = _get_blacklist_file(writer_id)
+    items = _load_list(path)
+    if word not in items:
+        items.append(word)
+        _save_list(path, items)
+    return jsonify({'success': True, 'message': f'已添加黑名单词: {word}'})
+
+@app.route('/api/writer/blacklist', methods=['DELETE'])
+@_require_roles({"writer"})
+def remove_blacklist():
+    data = request.get_json()
+    word = data.get('word', '').strip().lower()
+    if not word:
+        return jsonify({'success': False, 'error': '关键词不能为空'}), 400
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    path = _get_blacklist_file(writer_id)
+    items = _load_list(path)
+    if word in items:
+        items.remove(word)
+        _save_list(path, items)
+    return jsonify({'success': True, 'message': f'已删除黑名单词: {word}'})
+
+@app.route('/api/writer/whitelist', methods=['GET'])
+@_require_roles({"writer"})
+def get_whitelist():
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    items = _load_list(_get_whitelist_file(writer_id))
+    return jsonify({'success': True, 'whitelist': items})
+
+@app.route('/api/writer/whitelist', methods=['POST'])
+@_require_roles({"writer"})
+def add_whitelist():
+    data = request.get_json()
+    word = data.get('word', '').strip().lower()
+    if not word:
+        return jsonify({'success': False, 'error': '关键词不能为空'}), 400
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    path = _get_whitelist_file(writer_id)
+    items = _load_list(path)
+    if word not in items:
+        items.append(word)
+        _save_list(path, items)
+    return jsonify({'success': True, 'message': f'已添加白名单词: {word}'})
+
+@app.route('/api/writer/whitelist', methods=['DELETE'])
+@_require_roles({"writer"})
+def remove_whitelist():
+    data = request.get_json()
+    word = data.get('word', '').strip().lower()
+    if not word:
+        return jsonify({'success': False, 'error': '关键词不能为空'}), 400
+    user = _get_session_user()
+    writer_id = user.get("writer_id")
+    path = _get_whitelist_file(writer_id)
+    items = _load_list(path)
+    if word in items:
+        items.remove(word)
+        _save_list(path, items)
+    return jsonify({'success': True, 'message': f'已删除白名单词: {word}'})
+
+#  全局 Epoch 查询接口 
+@app.route('/api/global-epoch', methods=['GET'])
+@_require_roles({"reader", "writer", "admin"})
+def get_current_global_epoch():
+    return jsonify({"success": True, "global_epoch": get_global_epoch()})
 if __name__ == '__main__':
     print("Starting Hermes Compliance Audit Web Server (Reader / Auditor API)")
     print(f"  Port: {FLASK_PORT}")
@@ -1810,4 +2586,5 @@ if __name__ == '__main__':
     print(f"  Epoch: {HERMES_EPOCH}")
     print(f"  Allowed writers: {'all' if ALLOWED_WRITERS is None else ALLOWED_WRITERS}")
     print(f"  请在浏览器打开: http://127.0.0.1:{FLASK_PORT} 或 http://localhost:{FLASK_PORT}")
+    threading.Thread(target=ttl_cleanup_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=FLASK_PORT, debug=FLASK_DEBUG)
