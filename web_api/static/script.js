@@ -198,12 +198,12 @@ function runKeywordPackQuickScan() {
     updateTopNKeywordCount();
     form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
 }
-
 function initLoginPage() {
     const roleSelect = getEl('login-role');
     const readerGroup = getEl('reader-username-group');
     const writerGroup = getEl('writer-id-group');
     const loginHint = getEl('login-hint');
+    const usernameInput = getEl('login-username');
     const form = getEl('login-form');
 
     function refreshLoginMode() {
@@ -212,12 +212,77 @@ function initLoginPage() {
             readerGroup.style.display = 'none';
             writerGroup.style.display = 'block';
             loginHint.textContent = '默认写者密码规则: writer{writer_id+1}，例如 writer_id=0 的密码是 writer1';
-        } else {
+            // 写者角色不需要用户名框，无需设置值
+        } else if (role === 'admin') {
+            readerGroup.style.display = 'block';
+            writerGroup.style.display = 'none';
+            loginHint.textContent = '默认管理员账号: admin / admin123';
+            if (usernameInput) usernameInput.value = 'admin';   // 关键：自动填充 admin
+        } else { // reader
             readerGroup.style.display = 'block';
             writerGroup.style.display = 'none';
             loginHint.textContent = '默认读者账号：reader / reader123';
+            if (usernameInput) usernameInput.value = 'reader';  // 自动填充 reader
         }
     }
+
+    roleSelect.addEventListener('change', refreshLoginMode);
+    refreshLoginMode();   // 页面加载时执行一次，使初始状态正确
+
+    // 只添加一次提交监听
+    form.addEventListener('submit', async function(event) {
+        event.preventDefault();
+
+        const role = roleSelect.value;
+        const username = (usernameInput?.value || '').trim();
+        const password = getEl('login-password').value || '';
+        const writerIdRaw = (getEl('login-writer-id').value || '').trim();
+
+        const submitBtn = form.querySelector('button[type="submit"]');
+        const btnText = submitBtn.querySelector('.btn-text');
+        const btnLoading = submitBtn.querySelector('.btn-loading');
+        const resultDiv = getEl('login-result');
+
+        submitBtn.disabled = true;
+        btnText.style.display = 'none';
+        btnLoading.style.display = 'inline';
+        resultDiv.style.display = 'none';
+
+        try {
+            const body = { role, password };
+            if (role === 'reader' || role === 'admin') {
+                body.username = username;
+            } else {
+                body.writer_id = writerIdRaw === '' ? null : parseInt(writerIdRaw, 10);
+            }
+
+            const data = await apiFetchJson('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            if (data.success) {
+                window.location.href = data.redirect || '/';
+                return;
+            }
+
+            resultDiv.className = 'result-message error';
+            resultDiv.innerHTML = `<strong>登录失败</strong><br>${escapeHtml(data.error || '未知错误')}`;
+            resultDiv.style.display = 'block';
+            showToast(data.error || '登录失败', 'error');
+        } catch (error) {
+            resultDiv.className = 'result-message error';
+            resultDiv.innerHTML = `<strong>请求失败</strong><br>${escapeHtml(error.message || String(error))}`;
+            resultDiv.style.display = 'block';
+            showToast('登录请求失败', 'error');
+        } finally {
+            submitBtn.disabled = false;
+            btnText.style.display = 'inline';
+            btnLoading.style.display = 'none';
+        }
+    });
+}
 
     roleSelect.addEventListener('change', refreshLoginMode);
     refreshLoginMode();
@@ -274,7 +339,7 @@ function initLoginPage() {
             btnLoading.style.display = 'none';
         }
     });
-}
+
 
 async function logout() {
     try {
