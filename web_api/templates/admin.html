@@ -23,7 +23,6 @@
             <button class="btn btn-secondary" onclick="logout()">退出登录</button>
         </header>
 
-        <!-- 全局审计批次管理 -->
         <div class="card">
             <h2>全局审计批次管理</h2>
             <p>当前全局 Epoch: <strong id="global-epoch-value">-</strong></p>
@@ -37,9 +36,17 @@
     </div>
 
     <script>
-        //通用 fetch 封装，处理 401 自动跳转登录
+        // 带凭证的 fetch，避免会话丢失
         async function fetchWithAuth(url, options = {}) {
-            const res = await fetch(url, options);
+            const mergedOptions = {
+                ...options,
+                credentials: 'include',   // 关键：携带 cookie
+                headers: {
+                    ...(options.headers || {}),
+                    'Content-Type': 'application/json'
+                }
+            };
+            const res = await fetch(url, mergedOptions);
             if (res.status === 401) {
                 window.location.href = '/login';
                 throw new Error('Unauthorized');
@@ -47,7 +54,6 @@
             return res;
         }
 
-        // 全局审计批次 
         async function fetchGlobalEpoch() {
             try {
                 const res = await fetchWithAuth('/api/global-epoch');
@@ -56,8 +62,16 @@
                     document.getElementById('global-epoch-value').textContent = data.global_epoch;
                 }
             } catch (e) {
-              
+                console.warn('获取全局 Epoch 失败', e);
             }
+        }
+
+    
+        function extractNewEpochFromMessage(message) {
+            if (!message) return null;
+            const match = message.match(/推进至\s*(\d+)/);
+            if (match && match[1]) return parseInt(match[1], 10);
+            return null;
         }
 
         async function advanceGlobalEpoch() {
@@ -68,19 +82,25 @@
 
             if (!confirm(`确认推进全局审计 Epoch ${body.target_epoch ? '到 ' + body.target_epoch : '（自动递增）'} 吗？`)) return;
 
+            const resultDiv = document.getElementById('global-epoch-result');
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result-message info';
+            resultDiv.textContent = '正在提交任务...';
+
             try {
                 const res = await fetchWithAuth('/api/admin/epoch/advance', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(body)
                 });
                 const data = await res.json();
-                const resultDiv = document.getElementById('global-epoch-result');
-                resultDiv.style.display = 'block';
-                resultDiv.className = 'result-message info';
-                resultDiv.textContent = data.message || data.error;
+                if (!data.success) {
+                    resultDiv.className = 'result-message error';
+                    resultDiv.textContent = data.error || '推进失败';
+                    return;
+                }
 
-                if (data.success && data.task_id) {
+                resultDiv.textContent = data.message || '任务已创建，等待执行...';
+                if (data.task_id) {
                     const interval = setInterval(async () => {
                         try {
                             const statusRes = await fetchWithAuth(`/api/admin/epoch/task/${data.task_id}`);
@@ -96,7 +116,15 @@
                                 clearInterval(interval);
                                 resultDiv.className = 'result-message success';
                                 resultDiv.textContent = task.message;
+
+                
+                                const newEpoch = extractNewEpochFromMessage(task.message);
+                                if (newEpoch !== null) {
+                                    document.getElementById('global-epoch-value').textContent = newEpoch;
+                                }
+                           
                                 fetchGlobalEpoch();
+
                                 if (targetInput) targetInput.value = '';
                             } else if (task.status === 'failed') {
                                 clearInterval(interval);
@@ -105,22 +133,19 @@
                             }
                         } catch (e) {
                             clearInterval(interval);
+                            resultDiv.textContent = '轮询出错: ' + (e.message || '未知错误');
                         }
                     }, 1000);
                 }
             } catch (e) {
-                if (e.message !== 'Unauthorized') {
-                    const resultDiv = document.getElementById('global-epoch-result');
-                    resultDiv.style.display = 'block';
-                    resultDiv.className = 'result-message error';
-                    resultDiv.textContent = '请求失败';
-                }
+                resultDiv.className = 'result-message error';
+                resultDiv.textContent = '请求失败: ' + (e.message || '未知错误');
             }
         }
 
         async function logout() {
             try {
-                await fetch('/api/auth/logout', { method: 'POST' });
+                await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
             } catch (e) {}
             window.location.href = '/login';
         }
