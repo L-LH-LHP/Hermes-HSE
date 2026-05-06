@@ -117,19 +117,7 @@ WRITER_PASSWORD_PREFIX = os.getenv("HERMES_WRITER_PASSWORD_PREFIX", "writer")
 ADMIN_USERNAME = os.getenv("HERMES_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("HERMES_ADMIN_PASSWORD", "admin123")
 
-# 读者授权信息持久化到 readers.json
-READERS_FILE = Path(__file__).parent / "readers.json"
-def load_readers():
-    if READERS_FILE.exists():
-        try:
-            with open(READERS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            pass
-    return [{"username": READER_USERNAME, "password": READER_PASSWORD}]
-def save_readers(readers):
-    with open(READERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(readers, f, indent=2)
+
 
 def _get_session_user():
     user = session.get("auth_user")
@@ -670,6 +658,15 @@ def _rebuild_database_for_writer_incremental_with_filter(writer_id: int, file_id
         return True, ""
     except Exception as e:
         return False, str(e)
+# 批量导入任务存储（ZIP/目录）
+batch_tasks = {}
+batch_tasks_lock = threading.Lock()
+batch_executor = ThreadPoolExecutor(max_workers=2)
+
+# 管理员 Epoch 推进任务存储
+admin_epoch_tasks = {}
+admin_epoch_tasks_lock = threading.Lock()
+admin_epoch_executor = ThreadPoolExecutor(max_workers=1)
 #管理员路由
 @app.route('/admin')
 @_require_admin
@@ -2032,12 +2029,7 @@ def batch_import_zip():
     batch_executor.submit(zip_wrapper)
     return jsonify({'success': True, 'task_id': task_id})
 # ---------- 批量导入任务存储（全局） ----------
-batch_tasks = {}
-batch_tasks_lock = threading.Lock()
-batch_executor = ThreadPoolExecutor(max_workers=2)
-admin_epoch_tasks = {}
-admin_epoch_tasks_lock = threading.Lock()
-admin_epoch_executor = ThreadPoolExecutor(max_workers=1)  
+
 def process_directory(task_id, dir_path, writer_id):
     try:
         with batch_tasks_lock:
