@@ -6,14 +6,21 @@
     <title>Hermes 登录</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Hermes 角色认证登录</h1>
-            <p class="subtitle">先选择角色，再进入对应功能页面</p>
-        </header>
+<body class="auth-body">
+    <main class="auth-shell">
+        <section class="auth-intro">
+            <div class="brand-block">
+                <div class="brand-mark">H</div>
+                <div class="brand-copy">
+                    <strong>Hermes</strong>
+                    <span>多写作者邮件合规审计系统</span>
+                </div>
+            </div>
+            <h1>角色认证登录</h1>
+            <p class="subtitle">选择审计员、写者或管理员身份，进入对应工作台。</p>
+        </section>
 
-        <div class="card" style="max-width: 560px; margin: 0 auto;">
+        <section class="card auth-card">
             <h2>登录</h2>
             <form id="login-form">
                 <div class="form-group">
@@ -47,8 +54,8 @@
                 </button>
             </form>
             <div id="login-result" class="result-message" style="display: none; margin-top: 1rem;"></div>
-        </div>
-    </div>
+        </section>
+    </main>
 
     <div id="toast" class="toast"></div>
     <script src="{{ url_for('static', filename='script.js') }}"></script>

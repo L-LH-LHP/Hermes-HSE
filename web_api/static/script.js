@@ -60,6 +60,35 @@ function getEl(id) {
     return document.getElementById(id);
 }
 
+function switchReaderPanel(panelId) {
+    document.querySelectorAll('.app-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.id === panelId);
+    });
+    document.querySelectorAll('.app-nav-item[data-panel]').forEach(item => {
+        item.classList.toggle('active', item.dataset.panel === panelId);
+    });
+}
+
+function switchTab(tabName) {
+    const legacyTarget = getEl(`${tabName}-tab`);
+    if (legacyTarget) {
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(panel => panel.classList.remove('active'));
+        legacyTarget.classList.add('active');
+        const trigger = document.querySelector(`.tab-btn[onclick*="'${tabName}'"], .tab-btn[onclick*="${tabName}"]`);
+        if (trigger) trigger.classList.add('active');
+        return;
+    }
+
+    const contentTarget = getEl(`content-${tabName}`);
+    if (!contentTarget) return;
+    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(panel => panel.classList.remove('active'));
+    const tab = getEl(`tab-${tabName}`);
+    if (tab) tab.classList.add('active');
+    contentTarget.classList.add('active');
+}
+
 async function apiFetchJson(url, options = {}) {
     const response = await fetch(`${API_BASE}${url}`, options);
     let data = {};
@@ -283,63 +312,6 @@ function initLoginPage() {
         }
     });
 }
-
-    roleSelect.addEventListener('change', refreshLoginMode);
-    refreshLoginMode();
-
-    form.addEventListener('submit', async function(event) {
-        event.preventDefault();
-
-        const role = roleSelect.value;
-        const username = (getEl('login-username').value || '').trim();
-        const password = getEl('login-password').value || '';
-        const writerIdRaw = (getEl('login-writer-id').value || '').trim();
-
-        const submitBtn = form.querySelector('button[type="submit"]');
-        const btnText = submitBtn.querySelector('.btn-text');
-        const btnLoading = submitBtn.querySelector('.btn-loading');
-        const resultDiv = getEl('login-result');
-
-        submitBtn.disabled = true;
-        btnText.style.display = 'none';
-        btnLoading.style.display = 'inline';
-        resultDiv.style.display = 'none';
-
-        try {
-            const body = { role, password };
-            if (role === 'reader') {
-                body.username = username;
-            } else {
-                body.writer_id = writerIdRaw === '' ? null : parseInt(writerIdRaw, 10);
-            }
-
-            const data = await apiFetchJson('/api/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-
-            if (data.success) {
-                window.location.href = data.redirect || '/';
-                return;
-            }
-
-            resultDiv.className = 'result-message error';
-            resultDiv.innerHTML = `<strong>登录失败</strong><br>${escapeHtml(data.error || '未知错误')}`;
-            resultDiv.style.display = 'block';
-            showToast(data.error || '登录失败', 'error');
-        } catch (error) {
-            resultDiv.className = 'result-message error';
-            resultDiv.innerHTML = `<strong>请求失败</strong><br>${escapeHtml(error.message || String(error))}`;
-            resultDiv.style.display = 'block';
-            showToast('登录请求失败', 'error');
-        } finally {
-            submitBtn.disabled = false;
-            btnText.style.display = 'inline';
-            btnLoading.style.display = 'none';
-        }
-    });
-
 
 async function logout() {
     try {

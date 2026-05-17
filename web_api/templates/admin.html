@@ -16,23 +16,50 @@
         .result-message.info { background: #dbeafe; color: #1e40af; }
     </style>
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>管理员控制台</h1>
-            <button class="btn btn-secondary" onclick="logout()">退出登录</button>
-        </header>
-
-        <div class="card">
-            <h2>全局审计批次管理</h2>
-            <p>当前全局 Epoch: <strong id="global-epoch-value">-</strong></p>
-            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
-                <input type="number" id="target-epoch-input" placeholder="目标 Epoch (如 5)" min="1" style="flex: 1;">
-                <button class="btn btn-warning" onclick="advanceGlobalEpoch()">推进全局 Epoch 并清理过期索引</button>
+<body class="app-body">
+    <div class="app-shell">
+        <aside class="app-sidebar">
+            <div class="brand-block">
+                <div class="brand-mark">H</div>
+                <div class="brand-copy">
+                    <strong>Hermes</strong>
+                    <span>管理员控制台</span>
+                </div>
             </div>
-            <p class="card-desc" style="color: #64748b; font-size: 0.9rem;">不填则自动递增 1。推进后，所有写者的过期关键词（TTL ≤ 新 Epoch）将被自动清理。</p>
-            <div id="global-epoch-result" class="result-message" style="display:none;"></div>
-        </div>
+            <nav class="side-nav" aria-label="管理员功能">
+                <button class="app-nav-item active" type="button">
+                    <span class="nav-icon">●</span><span class="nav-label">全局 Epoch</span>
+                </button>
+            </nav>
+            <div class="sidebar-footer">
+                <span class="user-pill">{{ user.username }}</span>
+                <button class="icon-text-btn" type="button" onclick="logout()">退出</button>
+            </div>
+        </aside>
+
+        <main class="app-main">
+            <header class="workspace-header">
+                <div>
+                    <p class="eyebrow">多写作者邮件合规审计系统</p>
+                    <h1>管理员控制台</h1>
+                    <p class="subtitle">推进全局审计批次，并触发写者过期索引清理。</p>
+                </div>
+            </header>
+
+            <div class="card admin-card">
+                <h2>全局审计批次管理</h2>
+                <div class="metric-strip">
+                    <span>当前全局 Epoch</span>
+                    <strong id="global-epoch-value">-</strong>
+                </div>
+                <div class="admin-action-row">
+                    <input type="number" id="target-epoch-input" placeholder="目标 Epoch (如 5)" min="1">
+                    <button class="btn btn-warning" onclick="advanceGlobalEpoch()">推进全局 Epoch 并清理过期索引</button>
+                </div>
+                <p class="card-desc">不填则自动递增 1。推进后，所有写者的过期关键词（TTL ≤ 新 Epoch）将被自动清理。</p>
+                <div id="global-epoch-result" class="result-message" style="display:none;"></div>
+            </div>
+        </main>
     </div>
 
     <script>

@@ -75,35 +75,58 @@
     </style>
 <base target="_blank">
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Hermes 写者端</h1>
-            <p class="subtitle">管理您的关键词索引与文件关联</p>
-            <div style="margin-top: 10px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+<body class="app-body">
+    <div class="app-shell">
+        <aside class="app-sidebar">
+            <div class="brand-block">
+                <div class="brand-mark">H</div>
+                <div class="brand-copy">
+                    <strong>Hermes</strong>
+                    <span>写者工作台</span>
+                </div>
+            </div>
+
+            <nav class="side-nav" aria-label="写者功能">
+                <button class="tab app-nav-item active" type="button" onclick="switchTab('keywords')" id="tab-keywords">
+                    <span class="nav-icon">#</span><span class="nav-label">关键词管理</span>
+                </button>
+                <button class="tab app-nav-item" type="button" onclick="switchTab('files')" id="tab-files">
+                    <span class="nav-icon">≡</span><span class="nav-label">文件列表</span>
+                </button>
+                <button class="tab app-nav-item" type="button" onclick="switchTab('update')" id="tab-update">
+                    <span class="nav-icon">✎</span><span class="nav-label">内容更新</span>
+                </button>
+                <button class="tab app-nav-item" type="button" onclick="switchTab('create')" id="tab-create">
+                    <span class="nav-icon">＋</span><span class="nav-label">新建文件</span>
+                </button>
+                <button class="tab app-nav-item" type="button" onclick="switchTab('stats')" id="tab-stats">
+                    <span class="nav-icon">●</span><span class="nav-label">系统管理</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <span class="user-pill">{{ user.username }} · writer_id={{ user.writer_id }}</span>
+                <button class="icon-text-btn" type="button" onclick="logout()">退出</button>
+            </div>
+        </aside>
+
+        <main class="app-main">
+            <header class="workspace-header">
                 <div>
-                    <span style="margin-right: 12px; color: #4b5563;">当前账号: {{ user.username }} (writer_id={{ user.writer_id }})</span>
-                    <button class="btn btn-secondary btn-sm" onclick="logout()">退出登录</button>
+                    <p class="eyebrow">多写作者邮件合规审计系统</p>
+                    <h1>写者端</h1>
+                    <p class="subtitle">管理关键词索引、文件内容和本地索引策略。</p>
                 </div>
                 <div class="connection-status" id="connection-status">
                     <span class="status-led unknown" id="status-led"></span>
                     <span id="status-text">检查连接中...</span>
                     <button class="refresh-status" onclick="checkCppConnection()" title="刷新连接状态">↻</button>
                 </div>
-            </div>
-        </header>
+            </header>
 
         <div class="dashboard">
             <div class="stat-card"><div>关键词总数</div><div class="stat-number" id="total-keywords">-</div><div>个独立关键词</div></div>
             <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);"><div>关联文件数</div><div class="stat-number" id="total-files">-</div><div>个已索引文件</div></div>
-        </div>
-
-        <div class="tabs">
-            <div class="tab active" onclick="switchTab('keywords')" id="tab-keywords">关键词管理</div>
-            <div class="tab" onclick="switchTab('files')" id="tab-files">文件列表</div>
-            <div class="tab" onclick="switchTab('update')" id="tab-update">内容更新</div>
-            <div class="tab" onclick="switchTab('create')" id="tab-create">新建文件</div>
-            <div class="tab" onclick="switchTab('stats')" id="tab-stats">系统管理</div>
         </div>
 
        
@@ -215,6 +238,7 @@
                 <div id="dict-result" class="result-message" style="display:none; margin-top:10px;"></div>
             </div>
         </div>
+        </main>
     </div>
 
     <!-- 预览模态框 -->
