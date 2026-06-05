@@ -1,4 +1,4 @@
-// Hermes Web 前端（登录分流：reader / writer）
+// 面向邮件数据的可搜索加密系统 Web 前端（登录分流：reader / writer）
 
 const API_BASE = (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:')
     ? 'http://127.0.0.1:5000'
@@ -1553,8 +1553,11 @@ async function renderCollusionGraph(rows) {
         if (!byWriter.has(item.writerId)) byWriter.set(item.writerId, []);
         byWriter.get(item.writerId).push(item);
     });
+    const maxFilesPerWriter = 2;
+    const maxVisibleFiles = 24;
+    const maxVisibleEdges = 56;
     Array.from(byWriter.keys()).sort((a, b) => a - b).forEach(writerId => {
-        byWriter.get(writerId).slice(0, 4).forEach(item => {
+        byWriter.get(writerId).slice(0, maxFilesPerWriter).forEach(item => {
             if (!selectedFileKeySet.has(item.fileKey)) {
                 selectedFileKeySet.add(item.fileKey);
                 selectedFileKeys.push(item.fileKey);
@@ -1562,17 +1565,17 @@ async function renderCollusionGraph(rows) {
         });
     });
     allFileRows.forEach(item => {
-        if (selectedFileKeys.length >= 42) return;
+        if (selectedFileKeys.length >= maxVisibleFiles) return;
         if (!selectedFileKeySet.has(item.fileKey)) {
             selectedFileKeySet.add(item.fileKey);
             selectedFileKeys.push(item.fileKey);
         }
     });
-    const selectedFiles = selectedFileKeys.slice(0, 42);
+    const selectedFiles = selectedFileKeys.slice(0, maxVisibleFiles);
     const selectedFileSet = new Set(selectedFiles);
     const edges = allEdges
         .filter(edge => selectedFileSet.has(edge.fileKey))
-        .slice(0, 90);
+        .slice(0, maxVisibleEdges);
 
     const writers = Array.from(new Set(edges.map(edge => edge.writerId))).sort((a, b) => a - b);
     const files = Array.from(new Map(edges.map(edge => [edge.fileKey, {
@@ -1584,14 +1587,18 @@ async function renderCollusionGraph(rows) {
         metadata: edge.metadata,
     }])).values())
         .sort((a, b) => b.score - a.score || a.writerId - b.writerId || a.fileId - b.fileId);
-    const height = Math.max(380, Math.min(1320, Math.max(writers.length, files.length) * 42 + 90));
+    const rowCount = Math.max(writers.length, files.length);
+    const height = Math.max(260, Math.min(680, rowCount * 28 + 82));
+    const topPad = 48;
+    const bottomPad = 42;
+    const usableHeight = Math.max(1, height - topPad - bottomPad);
     const writerY = {};
     const fileY = {};
     writers.forEach((writerId, idx) => {
-        writerY[writerId] = 60 + idx * ((height - 120) / Math.max(1, writers.length - 1));
+        writerY[writerId] = topPad + idx * (usableHeight / Math.max(1, writers.length - 1));
     });
     files.forEach((file, idx) => {
-        fileY[file.fileKey] = 60 + idx * ((height - 120) / Math.max(1, files.length - 1));
+        fileY[file.fileKey] = topPad + idx * (usableHeight / Math.max(1, files.length - 1));
     });
 
     const svgEdges = edges.map(edge => {
@@ -1600,7 +1607,7 @@ async function renderCollusionGraph(rows) {
             : '';
         const title = `员工 ${edge.writerId} -> 员工 ${edge.writerId} / 文件 ${edge.fileId}: ${edge.keywords.join(', ')}${metaInfo}`;
         return `
-            <line class="graph-edge-line" x1="180" y1="${writerY[edge.writerId].toFixed(2)}" x2="790" y2="${fileY[edge.fileKey].toFixed(2)}">
+            <line class="graph-edge-line" x1="158" y1="${writerY[edge.writerId].toFixed(2)}" x2="622" y2="${fileY[edge.fileKey].toFixed(2)}">
                 <title>${escapeHtml(title)}</title>
             </line>
         `;
@@ -1612,19 +1619,19 @@ async function renderCollusionGraph(rows) {
     const svgExchangeEdges = exchangeRowsForSvg.map((row, idx) => {
         const y1 = writerY[row.fromWriter];
         const y2 = writerY[row.toWriter];
-        const offset = 34 + (idx % 4) * 16;
+        const offset = 30 + (idx % 4) * 12;
         const title = `员工 ${row.fromWriter} -> 员工 ${row.toWriter}: ${row.count} 封命中邮件；关键词 ${row.keywords.join(', ')}`;
         return `
-            <path class="graph-exchange-line" d="M 122 ${y1.toFixed(2)} C ${offset} ${y1.toFixed(2)}, ${offset} ${y2.toFixed(2)}, 122 ${y2.toFixed(2)}">
+            <path class="graph-exchange-line" d="M 110 ${y1.toFixed(2)} C ${offset} ${y1.toFixed(2)}, ${offset} ${y2.toFixed(2)}, 110 ${y2.toFixed(2)}">
                 <title>${escapeHtml(title)}</title>
             </path>
         `;
     }).join('');
 
     const writerNodes = writers.map(writerId => `
-        <g class="graph-node writer-node" transform="translate(145 ${writerY[writerId].toFixed(2)})">
-            <circle r="17"></circle>
-            <text x="-54" y="5">员工 ${writerId}</text>
+        <g class="graph-node writer-node" transform="translate(126 ${writerY[writerId].toFixed(2)})">
+            <circle r="11"></circle>
+            <text x="-48" y="4">员工 ${writerId}</text>
         </g>
     `).join('');
 
@@ -1635,18 +1642,18 @@ async function renderCollusionGraph(rows) {
             : '未解析到邮件头';
         const title = `员工 ${file.writerId} / 文件 ${file.fileId}: ${keywords.join(', ')} | ${metaInfo}`;
         return `
-            <g class="graph-node file-node" transform="translate(825 ${fileY[file.fileKey].toFixed(2)})">
+            <g class="graph-node file-node" transform="translate(650 ${fileY[file.fileKey].toFixed(2)})">
                 <title>${escapeHtml(title)}</title>
-                <rect x="-22" y="-13" width="44" height="26" rx="7"></rect>
-                <text x="32" y="5">员工 ${file.writerId} / 文件 ${file.fileId} · ${keywords.length} 词</text>
+                <rect x="-16" y="-10" width="32" height="20" rx="5"></rect>
+                <text x="24" y="4">员工 ${file.writerId} / 文件 ${file.fileId} · ${keywords.length} 词</text>
             </g>
         `;
     }).join('');
 
     panel.innerHTML = `
-        <svg class="collusion-graph-svg" viewBox="0 0 1000 ${height}" role="img" aria-label="跨写者关联图谱">
-            <text class="graph-axis-label" x="95" y="26">写者</text>
-            <text class="graph-axis-label" x="760" y="26">高危文件（写者内编号）</text>
+        <svg class="collusion-graph-svg" viewBox="0 0 900 ${height}" role="img" aria-label="跨写者关联图谱" preserveAspectRatio="xMidYMin meet">
+            <text class="graph-axis-label" x="72" y="24">写者</text>
+            <text class="graph-axis-label" x="612" y="24">高危文件（写者内编号）</text>
             ${svgExchangeEdges}
             ${svgEdges}
             ${writerNodes}

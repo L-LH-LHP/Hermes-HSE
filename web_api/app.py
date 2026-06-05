@@ -1,5 +1,5 @@
 """
-多写作者邮件合规审计系统 - Web 后端
+面向邮件数据的可搜索加密系统 - Web 后端
 
 角色：读者（审计员）通过本 API 进行跨写作者关键字搜索，写作者为安然员工，管理员负责推进审计批次 Epoch。
 云服务器仅存储加密索引、执行搜索，无法获知关键字明文。
@@ -187,7 +187,7 @@ def _get_active_epoch() -> int:
 
 def get_server_num_writers() -> int:
     """
-    直接向Hermes server发送'G'查询真实writer数量。
+    直接向 C++ server 发送 'G' 查询真实 writer 数量。
     优先使用：
       1. pyzmq 直接问server
       2. HermesClient.get_effective_num_writers()
@@ -426,7 +426,7 @@ def _email_to_writer_map(max_files_per_writer: int = 80):
     """
     粗略建立 email -> writer_id(0-based) 映射。
     优先使用各 mailbox 的 sent 类目录里的 From 地址；这是展示同谋图谱用的元数据辅助，
-    不参与 Hermes 密文检索。
+    不参与密文检索。
     """
     global _EMAIL_WRITER_MAP_CACHE
     if _EMAIL_WRITER_MAP_CACHE is not None:
@@ -1120,7 +1120,7 @@ def update():
                 'error': f'关键词 "{keyword}" 当前在黑名单中，无法添加到索引。'
             }), 400
 
-        # 执行索引更新（C++ 客户端发往 Hermes 服务器）
+        # 执行索引更新（C++ 客户端发往密文检索服务器）
         success = hermes_client.update(writer_id, keyword, file_id)
         
         if not success:
@@ -2571,7 +2571,7 @@ def remove_whitelist():
 def get_current_global_epoch():
     return jsonify({"success": True, "global_epoch": get_global_epoch()})
 if __name__ == '__main__':
-    print("Starting Hermes Compliance Audit Web Server (Reader / Auditor API)")
+    print("Starting 面向邮件数据的可搜索加密系统 Web Server (Reader / Auditor API)")
     print(f"  Port: {FLASK_PORT}")
     print(f"  C++ server: {CLIENT_CONFIG['server_address']}")
     print(f"  Writers (server): {CLIENT_CONFIG['num_writers']}")

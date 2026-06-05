@@ -3,16 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hermes - 读者检索</title>
+    <title>面向邮件数据的可搜索加密系统 - 读者检索</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="app-body">
     <div class="app-shell">
         <aside class="app-sidebar">
             <div class="brand-block">
-                <div class="brand-mark">H</div>
+                <div class="brand-mark">邮</div>
                 <div class="brand-copy">
-                    <strong>Hermes</strong>
+                    <strong>面向邮件数据的可搜索加密系统</strong>
                     <span>审计员工作台</span>
                 </div>
             </div>
@@ -47,7 +47,7 @@
         <main class="app-main">
             <header class="workspace-header">
                 <div>
-                    <p class="eyebrow">多写作者邮件合规审计系统</p>
+                    <p class="eyebrow">面向邮件数据的可搜索加密系统</p>
                     <h1>读者端</h1>
                     <p class="subtitle">跨写者加密邮件检索、分析和审计留痕。</p>
                 </div>
@@ -91,7 +91,7 @@
                     <div class="card compact-card">
                         <h2>轮次追踪</h2>
                         <p class="card-desc">系统会记录同一关键词和写者范围的上一次检索结果，用于发现新增风险文件。</p>
-                        <div id="batch-switch-hint" class="input-hint">这里的“轮次”是前端结果快照对比，不再表示 Hermes 底层 Epoch。</div>
+                        <div id="batch-switch-hint" class="input-hint">这里的“轮次”是前端结果快照对比，不再表示底层 Epoch。</div>
                     </div>
                 </div>
 
@@ -105,7 +105,7 @@
             <section id="reader-boolean" class="app-panel">
                 <div class="card">
                     <h2>多关键词联合检索</h2>
-                    <p class="card-desc">为每个关键词分别发起 Hermes 精确检索，并仅在浏览器端计算交集或并集。适合定位同时包含多个风险词的邮件。</p>
+                    <p class="card-desc">为每个关键词分别发起系统精确检索，并仅在浏览器端计算交集或并集。适合定位同时包含多个风险词的邮件。</p>
                     <form id="boolean-search-form" onsubmit="handleBooleanSearch(event)">
                         <div class="form-group">
                             <label for="boolean-keywords">关键词列表</label>
@@ -143,7 +143,7 @@
             <section id="reader-fuzzy" class="app-panel">
                 <div class="card">
                     <h2>客户端模糊/词根扩展检索</h2>
-                    <p class="card-desc">在可信读者端把输入词扩展为常见形态变体，再分别发起 Hermes 精确关键词检索，并在浏览器端合并去重。</p>
+                    <p class="card-desc">在可信读者端把输入词扩展为常见形态变体，再分别发起系统精确关键词检索，并在浏览器端合并去重。</p>
                     <form id="fuzzy-search-form" onsubmit="handleFuzzySearch(event)">
                         <div class="form-group">
                             <label for="fuzzy-keyword">风险关键词</label>

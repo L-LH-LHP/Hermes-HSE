@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Hermes Web API 启动脚本
+# 面向邮件数据的可搜索加密系统 Web API 启动脚本
 
 echo "======================================"
-echo "Hermes Web API 启动脚本"
+echo "面向邮件数据的可搜索加密系统 Web API 启动脚本"
 echo "======================================"
 
 # 检查Python
@@ -51,4 +51,3 @@ echo "按 Ctrl+C 停止服务"
 echo ""
 
 python3 app.py
-

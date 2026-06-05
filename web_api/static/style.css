@@ -654,37 +654,38 @@ header h1 {
 }
 
 .collusion-graph-panel {
-    min-height: 260px;
-    max-height: 720px;
+    min-height: 220px;
+    max-height: 500px;
     overflow: auto;
     border: 1px solid #e2e8f0;
-    border-radius: 12px;
+    border-radius: 8px;
     background:
-        radial-gradient(circle at 18px 18px, rgba(37, 99, 235, 0.07) 0 2px, transparent 2px),
+        radial-gradient(circle at 14px 14px, rgba(37, 99, 235, 0.055) 0 1.5px, transparent 1.5px),
         #ffffff;
-    background-size: 34px 34px;
+    background-size: 28px 28px;
 }
 
 .collusion-graph-svg {
     display: block;
     width: 100%;
-    min-width: 760px;
+    min-width: 680px;
+    max-height: 680px;
 }
 
 .graph-edge-line {
-    stroke: rgba(100, 116, 139, 0.45);
-    stroke-width: 1.5;
+    stroke: rgba(100, 116, 139, 0.38);
+    stroke-width: 1.1;
 }
 
 .graph-exchange-line {
     fill: none;
-    stroke: rgba(220, 38, 38, 0.62);
-    stroke-width: 2;
-    stroke-dasharray: 6 4;
+    stroke: rgba(220, 38, 38, 0.54);
+    stroke-width: 1.4;
+    stroke-dasharray: 5 4;
 }
 
 .graph-node text {
-    font-size: 13px;
+    font-size: 11px;
     fill: #334155;
     dominant-baseline: middle;
 }
@@ -692,7 +693,7 @@ header h1 {
 .writer-node circle {
     fill: #2563eb;
     stroke: #dbeafe;
-    stroke-width: 4;
+    stroke-width: 3;
 }
 
 .writer-node text {
@@ -702,12 +703,12 @@ header h1 {
 .file-node rect {
     fill: #fff7ed;
     stroke: #fb923c;
-    stroke-width: 2;
+    stroke-width: 1.5;
 }
 
 .graph-axis-label {
     fill: #475569;
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 700;
 }
 
@@ -1292,7 +1293,7 @@ body.auth-body {
 
 .app-sidebar:hover,
 .app-sidebar:focus-within {
-    width: 260px;
+    width: 318px;
 }
 
 .brand-block {
@@ -1326,6 +1327,11 @@ body.auth-body {
     white-space: nowrap;
 }
 
+.brand-copy {
+    min-width: 0;
+    white-space: normal;
+}
+
 .app-sidebar:hover .brand-copy,
 .app-sidebar:focus-within .brand-copy,
 .app-sidebar:hover .nav-label,
@@ -1340,8 +1346,9 @@ body.auth-body {
 
 .brand-copy strong {
     display: block;
-    font-size: 1rem;
-    line-height: 1.1;
+    max-width: 230px;
+    font-size: 0.92rem;
+    line-height: 1.28;
     color: #ffffff;
 }
 
@@ -1709,10 +1716,10 @@ body.auth-body {
 .collusion-graph-panel {
     border-radius: 8px;
     background:
-        linear-gradient(rgba(31, 111, 235, 0.045) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(31, 111, 235, 0.045) 1px, transparent 1px),
+        linear-gradient(rgba(31, 111, 235, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(31, 111, 235, 0.035) 1px, transparent 1px),
         #ffffff;
-    background-size: 28px 28px;
+    background-size: 24px 24px;
 }
 
 .empty-state {
@@ -1803,7 +1810,7 @@ body.auth-body {
 
 @media (max-width: 1020px) {
     .app-sidebar {
-        width: 230px;
+        width: 318px;
     }
 
     .brand-copy,
