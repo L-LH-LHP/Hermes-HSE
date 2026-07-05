@@ -3,17 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>面向邮件数据的可搜索加密系统 - 读者检索</title>
+    <title>面向云端数据的多写者可搜索加密系统 - 读者检索</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="app-body">
     <div class="app-shell">
         <aside class="app-sidebar">
             <div class="brand-block">
-                <div class="brand-mark">邮</div>
+                <div class="brand-mark" aria-hidden="true">
+                    <span class="brand-cloud-core">云</span>
+                    <span class="brand-cloud-orbit"></span>
+                </div>
                 <div class="brand-copy">
-                    <strong>面向邮件数据的可搜索加密系统</strong>
+                    <strong>面向云端数据的多写者可搜索加密系统</strong>
                     <span>审计员工作台</span>
+                </div>
+                <div class="brand-signal" aria-hidden="true">
+                    <span></span><span></span><span></span>
                 </div>
             </div>
 
@@ -39,21 +45,46 @@
             </nav>
 
             <div class="sidebar-footer">
-                <span class="user-pill">{{ user.username }}</span>
+                <div class="sidebar-user-card">
+                    <span class="sidebar-user-label">当前身份</span>
+                    <span class="user-pill">{{ user.username }}</span>
+                </div>
                 <button class="icon-text-btn" type="button" onclick="logout()">退出</button>
             </div>
         </aside>
 
         <main class="app-main">
-            <header class="workspace-header">
+            <header class="workspace-header reader-soc-header">
                 <div>
-                    <p class="eyebrow">面向邮件数据的可搜索加密系统</p>
+                    <p class="eyebrow">面向云端数据的多写者可搜索加密系统</p>
                     <h1>读者端</h1>
-                    <p class="subtitle">跨写者加密邮件检索、分析和审计留痕。</p>
+                    <p class="subtitle">跨写者云端密文检索、分析和审计留痕。</p>
                 </div>
                 <div class="header-actions">
                     <span id="active-batch-badge" class="writer-select-count">检索轮次: 自动记录</span>
                     <button type="button" class="btn btn-secondary btn-sm" onclick="clearSearchSnapshots()">清空轮次基线</button>
+                </div>
+                <div class="soc-kpi-grid" aria-hidden="true">
+                    <div class="soc-kpi-card kpi-auth">
+                        <span class="soc-kpi-label">授权写者</span>
+                        <strong>25</strong>
+                        <span class="soc-kpi-note">active writer domains</span>
+                    </div>
+                    <div class="soc-kpi-card kpi-query">
+                        <span class="soc-kpi-label">检索轮次</span>
+                        <strong>Auto</strong>
+                        <span class="soc-kpi-note">snapshot baseline</span>
+                    </div>
+                    <div class="soc-kpi-card kpi-hit">
+                        <span class="soc-kpi-label">命中监测</span>
+                        <strong>Delta</strong>
+                        <span class="soc-kpi-note">new files highlighted</span>
+                    </div>
+                    <div class="soc-kpi-card kpi-audit">
+                        <span class="soc-kpi-label">审计留痕</span>
+                        <strong>Case</strong>
+                        <span class="soc-kpi-note">exportable evidence</span>
+                    </div>
                 </div>
             </header>
 
@@ -88,10 +119,35 @@
                         </form>
                     </div>
 
-                    <div class="card compact-card">
-                        <h2>轮次追踪</h2>
+                    <div class="card compact-card soc-watch-card">
+                        <div class="soc-watch-head">
+                            <div>
+                                <p class="auth-kicker">SOC watcher</p>
+                                <h2>轮次追踪</h2>
+                            </div>
+                            <div class="soc-pulse-ring" aria-hidden="true">
+                                <span></span>
+                            </div>
+                        </div>
                         <p class="card-desc">系统会记录同一关键词和写者范围的上一次检索结果，用于发现新增风险文件。</p>
                         <div id="batch-switch-hint" class="input-hint">这里的“轮次”是前端结果快照对比，不再表示底层 Epoch。</div>
+                        <div class="soc-signal-list" aria-hidden="true">
+                            <div>
+                                <span>Baseline</span>
+                                <strong>armed</strong>
+                            </div>
+                            <div>
+                                <span>Delta file</span>
+                                <strong>red flag</strong>
+                            </div>
+                            <div>
+                                <span>Scope</span>
+                                <strong>writer set</strong>
+                            </div>
+                        </div>
+                        <div class="soc-mini-timeline" aria-hidden="true">
+                            <i></i><i></i><i></i><i></i>
+                        </div>
                     </div>
                 </div>
 
@@ -105,11 +161,11 @@
             <section id="reader-boolean" class="app-panel">
                 <div class="card">
                     <h2>多关键词联合检索</h2>
-                    <p class="card-desc">为每个关键词分别发起系统精确检索，并仅在浏览器端计算交集或并集。适合定位同时包含多个风险词的邮件。</p>
+                    <p class="card-desc">为每个关键词分别发起系统精确检索，并仅在浏览器端计算交集或并集。适合定位同时命中多个风险词的云端密文数据。</p>
                     <form id="boolean-search-form" onsubmit="handleBooleanSearch(event)">
                         <div class="form-group">
                             <label for="boolean-keywords">关键词列表</label>
-                            <textarea id="boolean-keywords" class="keyword-textarea" rows="4" placeholder="例如：Enron, Fraud, Q3&#10;也可以每行输入一个关键词"></textarea>
+                            <textarea id="boolean-keywords" class="keyword-textarea" rows="4" placeholder="例如：cloud, access, audit, Q3&#10;也可以每行输入一个关键词"></textarea>
                             <div id="boolean-keyword-count" class="input-hint">当前将检索 0 个唯一关键词</div>
                         </div>
                         <div class="form-group">
@@ -218,7 +274,7 @@
 
                     <div class="card full-span">
                         <h2>跨写者关联图谱</h2>
-                        <p class="card-desc">把 Top-N 或审计词包扫描结果转换为“写者-高危文件”节点关系图，并汇总可能的员工间发送/接收线索。</p>
+                        <p class="card-desc">把 Top-N 或审计词包扫描结果转换为“写者-高危文件”节点关系图，并汇总可能的跨写者数据关联线索。</p>
                         <div class="graph-toolbar">
                             <button type="button" class="btn btn-secondary btn-sm" onclick="renderCollusionGraph()">刷新图谱</button>
                             <div id="collusion-graph-meta" class="input-hint">先执行一次多关键词 Top-N 或一键扫描词包后生成图谱。</div>
@@ -229,9 +285,9 @@
                         <div id="collusion-exchange-summary" class="exchange-summary"></div>
                         <div id="collusion-graph-legend" class="graph-legend" style="display: none;">
                             <span><i class="legend-dot writer"></i>写者</span>
-                            <span><i class="legend-dot file"></i>高危文件（员工/文件ID）</span>
+                            <span><i class="legend-dot file"></i>高危文件（写者/文件ID）</span>
                             <span><i class="legend-dot edge"></i>命中关系</span>
-                            <span><i class="legend-dot exchange"></i>邮件头推断通信</span>
+                            <span><i class="legend-dot exchange"></i>数据头推断关联</span>
                         </div>
                     </div>
                 </div>
