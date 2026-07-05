@@ -1,5 +1,5 @@
 """
-面向邮件数据的可搜索加密系统 - Web 后端
+面向云端数据的多写者可搜索加密系统 - Web 后端
 
 角色：读者（审计员）通过本 API 进行跨写作者关键字搜索，写作者为安然员工，管理员负责推进审计批次 Epoch。
 云服务器仅存储加密索引、执行搜索，无法获知关键字明文。
@@ -1687,7 +1687,7 @@ def get_document():
             'success': True,
             'encrypted': True,
             'placeholder': True,
-            'message': '未找到加密存储；读者端仅保留该文件ID作为检索命中线索，不提供原文查看。',
+            'message': '文件内容已加密；读者端仅保留该文件ID作为检索命中线索，不提供原文查看。',
         })
         
     except ValueError as e:
@@ -2571,7 +2571,7 @@ def remove_whitelist():
 def get_current_global_epoch():
     return jsonify({"success": True, "global_epoch": get_global_epoch()})
 if __name__ == '__main__':
-    print("Starting 面向邮件数据的可搜索加密系统 Web Server (Reader / Auditor API)")
+    print("Starting 面向云端数据的多写者可搜索加密系统 Web Server (Reader / Auditor API)")
     print(f"  Port: {FLASK_PORT}")
     print(f"  C++ server: {CLIENT_CONFIG['server_address']}")
     print(f"  Writers (server): {CLIENT_CONFIG['num_writers']}")
