@@ -3,25 +3,68 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>面向邮件数据的可搜索加密系统 登录</title>
+    <title>面向云端数据的多写者可搜索加密系统 登录</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="auth-body">
     <main class="auth-shell">
         <section class="auth-intro">
             <div class="brand-block">
-                <div class="brand-mark">邮</div>
+                <div class="brand-mark" aria-hidden="true">
+                    <span class="brand-cloud-core">云</span>
+                    <span class="brand-cloud-orbit"></span>
+                </div>
                 <div class="brand-copy">
-                    <strong>面向邮件数据的可搜索加密系统</strong>
+                    <strong>面向云端数据的多写者可搜索加密系统</strong>
                     <span>角色工作台入口</span>
                 </div>
+                <div class="brand-signal" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
             </div>
-            <h1>角色认证登录</h1>
-            <p class="subtitle">选择审计员、写者或管理员身份，进入对应工作台。</p>
+
+            <div class="auth-visual" aria-hidden="true">
+                <div class="auth-orbit orbit-a"></div>
+                <div class="auth-orbit orbit-b"></div>
+                <div class="auth-shield">
+                    <div class="shield-core">SE</div>
+                    <div class="shield-keyhole"></div>
+                </div>
+                <div class="auth-node node-a"></div>
+                <div class="auth-node node-b"></div>
+                <div class="auth-node node-c"></div>
+                <div class="auth-stream stream-a">0101 1100  AES  TOKEN  CLOUD</div>
+                <div class="auth-stream stream-b">WRITER-KEY  INDEX  QUERY  PROOF</div>
+            </div>
+
+            <div class="auth-copy-block">
+                <p class="auth-kicker">Cloud ciphertext access gateway</p>
+                <h1>角色认证登录</h1>
+                <p class="subtitle">选择审计员、写者或管理员身份，进入云端密文检索工作台。</p>
+            </div>
+
+            <div class="auth-status-strip" aria-hidden="true">
+                <div>
+                    <strong>Multi-writer</strong>
+                    <span>多写者索引</span>
+                </div>
+                <div>
+                    <strong>Encrypted</strong>
+                    <span>云端密文域</span>
+                </div>
+                <div>
+                    <strong>Auditable</strong>
+                    <span>检索留痕</span>
+                </div>
+            </div>
         </section>
 
         <section class="card auth-card">
-            <h2>登录</h2>
+            <div class="auth-card-head">
+                <p class="auth-kicker">Secure session</p>
+                <h2>登录</h2>
+                <p>请确认角色身份后进入对应控制台。</p>
+            </div>
             <form id="login-form">
                 <div class="form-group">
                     <label for="login-role">角色</label>
@@ -45,7 +88,7 @@
                 <div class="form-group">
                     <label for="login-password">密码</label>
                     <input type="password" id="login-password" required autocomplete="current-password" placeholder="输入密码">
-                    <small id="login-hint">默认读者账号：reader / reader123</small>
+                    <small id="login-hint" class="login-hint-hidden" aria-hidden="true"></small>
                 </div>
 
                 <button type="submit" class="btn btn-primary">
