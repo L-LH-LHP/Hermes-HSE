@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>面向邮件数据的可搜索加密系统 - 管理员控制台</title>
+    <title>面向云端数据的多写者可搜索加密系统 - 管理员控制台</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
         .container { max-width: 860px; margin: 0 auto; }
@@ -16,14 +16,20 @@
         .result-message.info { background: #dbeafe; color: #1e40af; }
     </style>
 </head>
-<body class="app-body">
+<body class="app-body admin-control">
     <div class="app-shell">
         <aside class="app-sidebar">
             <div class="brand-block">
-                <div class="brand-mark">邮</div>
+                <div class="brand-mark" aria-hidden="true">
+                    <span class="brand-cloud-core">云</span>
+                    <span class="brand-cloud-orbit"></span>
+                </div>
                 <div class="brand-copy">
-                    <strong>面向邮件数据的可搜索加密系统</strong>
+                    <strong>面向云端数据的多写者可搜索加密系统</strong>
                     <span>管理员控制台</span>
+                </div>
+                <div class="brand-signal" aria-hidden="true">
+                    <span></span><span></span><span></span>
                 </div>
             </div>
             <nav class="side-nav" aria-label="管理员功能">
@@ -32,33 +38,77 @@
                 </button>
             </nav>
             <div class="sidebar-footer">
-                <span class="user-pill">{{ user.username }}</span>
+                <div class="sidebar-user-card">
+                    <span class="sidebar-user-label">当前身份</span>
+                    <span class="user-pill">{{ user.username }}</span>
+                </div>
                 <button class="icon-text-btn" type="button" onclick="logout()">退出</button>
             </div>
         </aside>
 
         <main class="app-main">
-            <header class="workspace-header">
+            <header class="workspace-header admin-command-header">
                 <div>
-                    <p class="eyebrow">面向邮件数据的可搜索加密系统</p>
+                    <p class="eyebrow">面向云端数据的多写者可搜索加密系统</p>
                     <h1>管理员控制台</h1>
                     <p class="subtitle">推进全局审计批次，并触发写者过期索引清理。</p>
                 </div>
+                <div class="admin-radar" aria-hidden="true">
+                    <span></span>
+                    <i></i>
+                </div>
             </header>
 
-            <div class="card admin-card">
-                <h2>全局审计批次管理</h2>
-                <div class="metric-strip">
-                    <span>当前全局 Epoch</span>
-                    <strong id="global-epoch-value">-</strong>
+            <section class="admin-control-grid">
+                <div class="card admin-card admin-epoch-core">
+                    <div class="admin-core-head">
+                        <div>
+                            <p class="auth-kicker">Global governance</p>
+                            <h2>全局审计批次管理</h2>
+                        </div>
+                        <span class="admin-lock-chip">Index policy armed</span>
+                    </div>
+                    <div class="metric-strip admin-epoch-meter">
+                        <span>当前全局 Epoch</span>
+                        <strong id="global-epoch-value">-</strong>
+                        <em>ACTIVE CONTROL VALUE</em>
+                    </div>
+                    <div class="admin-action-row admin-epoch-actions">
+                        <input type="number" id="target-epoch-input" placeholder="目标 Epoch (如 5)" min="1">
+                        <button class="btn btn-warning" onclick="advanceGlobalEpoch()">推进全局 Epoch</button>
+                    </div>
+                    <p class="card-desc">不填则自动递增 1。推进后，所有写者的过期关键词（TTL ≤ 新 Epoch）将被自动清理。</p>
+                    <div id="global-epoch-result" class="result-message" style="display:none;"></div>
                 </div>
-                <div class="admin-action-row">
-                    <input type="number" id="target-epoch-input" placeholder="目标 Epoch (如 5)" min="1">
-                    <button class="btn btn-warning" onclick="advanceGlobalEpoch()">推进全局 Epoch 并清理过期索引</button>
-                </div>
-                <p class="card-desc">不填则自动递增 1。推进后，所有写者的过期关键词（TTL ≤ 新 Epoch）将被自动清理。</p>
-                <div id="global-epoch-result" class="result-message" style="display:none;"></div>
-            </div>
+
+                <aside class="admin-status-board" aria-hidden="true">
+                    <div class="admin-status-card">
+                        <span>系统健康</span>
+                        <strong>Nominal</strong>
+                        <i></i>
+                    </div>
+                    <div class="admin-status-card">
+                        <span>索引治理</span>
+                        <strong>TTL Sweep</strong>
+                        <i></i>
+                    </div>
+                    <div class="admin-status-card">
+                        <span>写者同步</span>
+                        <strong>Fan-out</strong>
+                        <i></i>
+                    </div>
+                    <div class="admin-status-card">
+                        <span>策略执行</span>
+                        <strong>Guarded</strong>
+                        <i></i>
+                    </div>
+                    <div class="admin-console-feed">
+                        <p>control://epoch.advance</p>
+                        <p>watch://writer.sync.window</p>
+                        <p>policy://expired-index.cleanup</p>
+                    </div>
+                </aside>
+            </section>
         </main>
     </div>
 
