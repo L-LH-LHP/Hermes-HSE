@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>面向邮件数据的可搜索加密系统 - 写者管理端</title>
+    <title>面向云端数据的多写者可搜索加密系统 - 写者管理端</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
         .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
@@ -75,14 +75,20 @@
     </style>
 <base target="_blank">
 </head>
-<body class="app-body">
+<body class="app-body writer-console">
     <div class="app-shell">
         <aside class="app-sidebar">
             <div class="brand-block">
-                <div class="brand-mark">邮</div>
+                <div class="brand-mark" aria-hidden="true">
+                    <span class="brand-cloud-core">云</span>
+                    <span class="brand-cloud-orbit"></span>
+                </div>
                 <div class="brand-copy">
-                    <strong>面向邮件数据的可搜索加密系统</strong>
+                    <strong>面向云端数据的多写者可搜索加密系统</strong>
                     <span>写者工作台</span>
+                </div>
+                <div class="brand-signal" aria-hidden="true">
+                    <span></span><span></span><span></span>
                 </div>
             </div>
 
@@ -105,28 +111,46 @@
             </nav>
 
             <div class="sidebar-footer">
-                <span class="user-pill">{{ user.username }} · writer_id={{ user.writer_id }}</span>
+                <div class="sidebar-user-card">
+                    <span class="sidebar-user-label">当前身份</span>
+                    <span class="user-pill">{{ user.username }} · writer_id={{ user.writer_id }}</span>
+                </div>
                 <button class="icon-text-btn" type="button" onclick="logout()">退出</button>
             </div>
         </aside>
 
         <main class="app-main">
-            <header class="workspace-header">
+            <header class="workspace-header writer-asset-header">
                 <div>
-                    <p class="eyebrow">面向邮件数据的可搜索加密系统</p>
+                    <p class="eyebrow">面向云端数据的多写者可搜索加密系统</p>
                     <h1>写者端</h1>
-                    <p class="subtitle">管理关键词索引、文件内容和本地索引策略。</p>
+                    <p class="subtitle">管理自己的云端数据资产、关键词密文索引、文件内容和 TTL 策略。</p>
                 </div>
                 <div class="connection-status" id="connection-status">
                     <span class="status-led unknown" id="status-led"></span>
                     <span id="status-text">检查连接中...</span>
                     <button class="refresh-status" onclick="checkCppConnection()" title="刷新连接状态">↻</button>
                 </div>
+                <div class="asset-flow-map" aria-hidden="true">
+                    <span class="asset-node node-cloud">Cloud</span>
+                    <span class="asset-link"></span>
+                    <span class="asset-node node-index">Index</span>
+                    <span class="asset-link"></span>
+                    <span class="asset-node node-ttl">TTL</span>
+                </div>
             </header>
 
-        <div class="dashboard">
-            <div class="stat-card"><div>关键词总数</div><div class="stat-number" id="total-keywords">-</div><div>个独立关键词</div></div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);"><div>关联文件数</div><div class="stat-number" id="total-files">-</div><div>个已索引文件</div></div>
+        <div class="dashboard writer-asset-dashboard">
+            <div class="stat-card asset-stat-keywords">
+                <div class="stat-label">关键词索引资产</div>
+                <div class="stat-number" id="total-keywords">-</div>
+                <div class="stat-note">个独立关键词</div>
+            </div>
+            <div class="stat-card asset-stat-files" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                <div class="stat-label">云端关联文件</div>
+                <div class="stat-number" id="total-files">-</div>
+                <div class="stat-note">个已索引文件</div>
+            </div>
         </div>
 
        
